@@ -43,6 +43,7 @@
   <select id="job-sort">
     <option value="name">名前順</option>
     <option value="fail">失敗率ワースト順</option>
+    <option value="worse">悪化順 (前半→後半)</option>
   </select>
   <span class="presets" id="job-count"></span>
 </div>
@@ -118,8 +119,21 @@ const MAX_DATE = dayKey(DATA.now);
 
 // ---- 表示対象のジョブ (フィルタ・並び替え後) ----
 // viewIdx: DATA.jobs / DATA.builds に対する元 index の配列。viewJobs: その名前。
+// viewDaily: dailyFailTime の結果。viewDelta: 前半→後半の失敗率の変化 (pt)。
 let viewIdx = [];
 let viewJobs = [];
+let viewDaily = [];
+let viewDelta = [];
+
+// 期間の前半と後半の失敗率の差 (パーセントポイント)。どちらかが状態不明なら null。
+function halfDelta(failMs, knownMs) {
+  const mid = Math.floor(failMs.length / 2);
+  const sum = (arr, s, e) => arr.slice(s, e).reduce((a, b) => a + b, 0);
+  const k1 = sum(knownMs, 0, mid);
+  const k2 = sum(knownMs, mid, knownMs.length);
+  if (!k1 || !k2) return null;
+  return (sum(failMs, mid, failMs.length) / k2 - sum(failMs, 0, mid) / k1) * 100;
+}
 
 function computeView(fromMs, endMs) {
   const days = Math.round((endMs - fromMs) / DAY_MS);
@@ -131,17 +145,26 @@ function computeView(fromMs, endMs) {
   const items = [];
   jobs.forEach((name, ji) => {
     if (terms.length && !terms.some((t) => name.toLowerCase().includes(t))) return;
-    const { failMs, knownMs } = dailyFailTime(DATA.builds[ji], fromMs, days);
-    const fail = failMs.reduce((a, b) => a + b, 0);
-    const known = knownMs.reduce((a, b) => a + b, 0);
+    const daily = dailyFailTime(DATA.builds[ji], fromMs, days);
+    const fail = daily.failMs.reduce((a, b) => a + b, 0);
+    const known = daily.knownMs.reduce((a, b) => a + b, 0);
     if (failedOnly && fail === 0) return;
-    items.push({ ji, name, rate: known ? fail / known : -1 });
+    items.push({
+      ji, name, daily,
+      rate: known ? fail / known : -1,
+      delta: halfDelta(daily.failMs, daily.knownMs),
+    });
   });
   if (sortMode === "fail") {
     items.sort((a, b) => b.rate - a.rate || a.name.localeCompare(b.name));
+  } else if (sortMode === "worse") {
+    items.sort((a, b) =>
+      ((b.delta ?? -Infinity) - (a.delta ?? -Infinity)) || a.name.localeCompare(b.name));
   }
   viewIdx = items.map((x) => x.ji);
   viewJobs = items.map((x) => x.name);
+  viewDaily = items.map((x) => x.daily);
+  viewDelta = items.map((x) => x.delta);
 }
 
 // ---- 選択中の期間 [fromMs, endMs) に対する集計 (表示対象のジョブのみ) ----
@@ -160,6 +183,7 @@ function computeStats(fromMs, endMs) {
       total,
       okPct: total ? Math.round((ok / total) * 100) : 0,
       ngPct: total ? Math.round((ng / total) * 100) : 0,
+      delta: viewDelta[vi],
     };
   });
   return stats;
@@ -250,7 +274,7 @@ function computeHeatmap(fromMs, endMs) {
 
   const values = [];
   viewIdx.forEach((oji, vi) => {
-    const { failMs, knownMs } = dailyFailTime(DATA.builds[oji], fromMs, dates.length);
+    const { failMs, knownMs } = viewDaily[vi];
     knownMs.forEach((known, di) => {
       if (!known) return; // 状態不明の日 (最初のビルドより前) は空白
       values.push([di, vi, Math.round((failMs[di] / known) * 100), failMs[di], known]);
@@ -259,17 +283,31 @@ function computeHeatmap(fromMs, endMs) {
   return { dates, values };
 }
 
+const MA_WINDOW = 7; // 移動平均の窓幅 (日)
+
+// 直近 w 日間の失敗時間の合計 ÷ 状態が分かっている時間の合計 (%)
+function movingAvg(failMs, knownMs, w) {
+  return failMs.map((_, i) => {
+    let f = 0, k = 0;
+    for (let j = Math.max(0, i - w + 1); j <= i; j++) {
+      f += failMs[j];
+      k += knownMs[j];
+    }
+    return k ? Math.round((f / k) * 100) : null;
+  });
+}
+
 function computeTrends(fromMs, endMs) {
-  // ジョブごとの「1 日のうち失敗状態だった時間の割合」。
+  // ジョブごとの「1 日のうち失敗状態だった時間の割合」と、その 7 日移動平均。
   // 状態が分からない日 (最初のビルドより前) は null (線が途切れる)。
   const dates = [];
   for (let t = fromMs; t < endMs; t += DAY_MS) dates.push(dayKey(t));
   const perJob = viewJobs.map((job, vi) => {
-    const { failMs, knownMs } = dailyFailTime(DATA.builds[viewIdx[vi]], fromMs, dates.length);
+    const { failMs, knownMs } = viewDaily[vi];
     const rates = knownMs.map((known, di) =>
       known ? Math.round((failMs[di] / known) * 100) : null
     );
-    return { name: job, rates, failMs, knownMs };
+    return { name: job, rates, maRates: movingAvg(failMs, knownMs, MA_WINDOW) };
   });
   return { dates, perJob };
 }
@@ -343,7 +381,16 @@ function timelineOption(fromMs, axisMax) {
           const name = job.length > 34 ? job.slice(0, 33) + "…" : job;
           const s = stats[job];
           if (!s || !s.total) return `{name|${name}}\n{dim|期間内ビルドなし}`;
-          return `{name|${name}}\n{ok|成功 ${s.okPct}%}{sep| / }{ng|失敗 ${s.ngPct}%}{dim| (${s.total}件)}`;
+          // 期間の前半→後半の失敗率の変化 (±5pt 以上で悪化/改善とみなす)
+          let tag = "";
+          if (s.delta != null) {
+            const d = Math.round(s.delta);
+            const txt = (d >= 0 ? "+" : "") + d + "pt";
+            if (d >= 5) tag = `{up| ↗${txt}}`;
+            else if (d <= -5) tag = `{down| ↘${txt}}`;
+            else tag = `{flat| →${txt}}`;
+          }
+          return `{name|${name}}\n{ok|成功 ${s.okPct}%}{sep| / }{ng|失敗 ${s.ngPct}%}{dim| (${s.total}件)}${tag}`;
         },
         rich: {
           name: { align: "right", color: "#263238", lineHeight: 18 },
@@ -351,6 +398,9 @@ function timelineOption(fromMs, axisMax) {
           sep: { color: "#90a4ae", fontSize: 11, lineHeight: 14 },
           ng: { color: "#c62828", fontSize: 11, lineHeight: 14 },
           dim: { color: "#90a4ae", fontSize: 11, lineHeight: 14 },
+          up: { color: "#c62828", fontSize: 11, lineHeight: 14, fontWeight: "bold" },
+          down: { color: "#2e7d32", fontSize: 11, lineHeight: 14, fontWeight: "bold" },
+          flat: { color: "#90a4ae", fontSize: 11, lineHeight: 14 },
         },
       },
     },
@@ -377,20 +427,25 @@ function timelineOption(fromMs, axisMax) {
   };
 }
 
+const PALETTE = ["#5470c6", "#91cc75", "#fac858", "#ee6666", "#73c0de",
+                 "#3ba272", "#fc8452", "#9a60b4", "#ea7ccc"];
+
 function trendOption(t, selected) {
-  const timeByJob = new Map(t.perJob.map((j) => [j.name, j]));
   return {
     tooltip: {
       trigger: "axis",
       formatter: (ps) => {
-        const lines = [ps[0].name];
+        // 同じジョブの移動平均と日次を 1 行にまとめる
+        const byJob = new Map();
         for (const p of ps) {
-          if (p.value == null) continue;
-          const j = timeByJob.get(p.seriesName);
-          lines.push(
-            `${p.marker}${p.seriesName}: ${p.value}%` +
-            ` (失敗 ${hoursLabel(j.failMs[p.dataIndex])} / ${hoursLabel(j.knownMs[p.dataIndex])})`
-          );
+          const [kind, vi] = p.seriesId.split(":");
+          if (!byJob.has(vi)) byJob.set(vi, { name: p.seriesName, marker: p.marker });
+          byJob.get(vi)[kind] = p.value;
+        }
+        const lines = [ps[0].name];
+        for (const g of byJob.values()) {
+          if (g.ma == null && g.raw == null) continue;
+          lines.push(`${g.marker}${g.name}: ${MA_WINDOW}日平均 ${g.ma ?? "-"}% / 日次 ${g.raw ?? "-"}%`);
         }
         return lines.length > 1 ? lines.join("<br>") : `${ps[0].name}<br>データなし`;
       },
@@ -408,13 +463,34 @@ function trendOption(t, selected) {
     grid: { left: 250, right: 30, top: 20, bottom: 70 },
     xAxis: { type: "category", data: t.dates, boundaryGap: false, axisLabel: { rotate: 45 } },
     yAxis: { type: "value", min: 0, max: 100, axisLabel: { formatter: "{value}%" } },
-    series: t.perJob.map((j) => ({
-      name: j.name,
-      type: "line",
-      data: j.rates,
-      connectNulls: false,
-      symbolSize: 4,
-    })),
+    // ジョブごとに「日次の生値 (薄い細線)」と「移動平均 (太線)」の 2 系列。
+    // 同じ name にすると凡例 1 つでまとめて ON/OFF できる。
+    series: t.perJob.flatMap((j, vi) => {
+      const color = PALETTE[vi % PALETTE.length];
+      return [
+        {
+          id: "raw:" + vi,
+          name: j.name,
+          type: "line",
+          data: j.rates,
+          connectNulls: false,
+          symbol: "none",
+          lineStyle: { color, width: 1, opacity: 0.25 },
+          itemStyle: { color },
+          emphasis: { disabled: true },
+        },
+        {
+          id: "ma:" + vi,
+          name: j.name,
+          type: "line",
+          data: j.maRates,
+          connectNulls: false,
+          symbol: "none",
+          lineStyle: { color, width: 2.5 },
+          itemStyle: { color },
+        },
+      ];
+    }),
   };
 }
 
