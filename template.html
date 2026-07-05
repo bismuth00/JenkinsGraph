@@ -341,7 +341,7 @@ document.getElementById("trend-all-on").addEventListener("click", () => setAllTr
 document.getElementById("trend-all-off").addEventListener("click", () => setAllTrendSeries(false));
 
 const hmEl = document.getElementById("heatmap");
-hmEl.style.height = jobs.length * ROW_H_HM + 170 + "px";
+hmEl.style.height = jobs.length * ROW_H_HM + 120 + "px";
 const hm = echarts.init(hmEl);
 
 // ジョブごとのミニ積み上げ棒 (small multiples) のレイアウト定数
@@ -501,7 +501,7 @@ function heatmapOption(values) {
         `<b>${viewJobs[p.data[1]]}</b><br>${currentDates[p.data[0]]}<br>` +
         `失敗率 ${p.data[2]}% (失敗 ${hoursLabel(p.data[3])} / ${hoursLabel(p.data[4])})`,
     },
-    grid: { left: 250, right: 30, top: 20, bottom: 110 },
+    grid: { left: 250, right: 30, top: 20, bottom: 90 },
     xAxis: { type: "category", data: currentDates, axisLabel: { rotate: 45 } },
     yAxis: {
       type: "category",
@@ -510,15 +510,11 @@ function heatmapOption(values) {
       axisLabel: { width: 230, overflow: "truncate" },
     },
     visualMap: {
+      show: false, // 色分けの定義のみに使い、凡例バーは出さない
       min: 0,
       max: 100,
       dimension: 2,
-      calculable: false, // 絞り込みスライダーなしの凡例のみ
       hoverLink: false,
-      orient: "horizontal",
-      left: "center",
-      bottom: 10,
-      text: ["100%", "0%"],
       inRange: { color: ["#e8f5e9", "#fff59d", "#ef5350", "#b71c1c"] },
     },
     series: [{
@@ -621,7 +617,7 @@ function render() {
   // 行数が変わるチャートの高さを表示ジョブ数に合わせる
   tlEl.style.height = viewJobs.length * ROW_H_TL + 100 + "px";
   trendEl.style.height = Math.max(300, viewJobs.length * 24 + 80) + "px";
-  hmEl.style.height = viewJobs.length * ROW_H_HM + 170 + "px";
+  hmEl.style.height = viewJobs.length * ROW_H_HM + 120 + "px";
   cntEl.style.height = CNT_TOP + viewJobs.length * CNT_ROW + CNT_BOTTOM + "px";
   tl.resize(); trend.resize(); hm.resize(); cnt.resize();
 
