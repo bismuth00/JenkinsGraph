@@ -52,6 +52,15 @@
 <h2>日別ヒートマップ — 1日のうち失敗状態だった時間の割合(%)</h2>
 <div id="heatmap"></div>
 
+<h2>日別ビルド回数(結果別の積み上げ)</h2>
+<div class="legend">
+  <span><i style="background:#66bb6a"></i>SUCCESS</span>
+  <span><i style="background:#e53935"></i>FAILURE</span>
+  <span><i style="background:#ffa726"></i>UNSTABLE</span>
+  <span><i style="background:#bdbdbd"></i>ABORTED</span>
+</div>
+<div id="counts"></div>
+
 <script>
 const DATA = __DATA__;
 
@@ -166,6 +175,33 @@ function dailyFailTime(builds, fromMs, days) {
 
 const hoursLabel = (ms) => (ms / 3600000).toFixed(1) + "h";
 
+// 積み上げの下から上への並び順
+const RESULT_ORDER = ["SUCCESS", "FAILURE", "UNSTABLE", "ABORTED"];
+function orderCodes(codes) {
+  return [...codes].sort((a, b) => {
+    const ia = RESULT_ORDER.indexOf(DATA.results[a]);
+    const ib = RESULT_ORDER.indexOf(DATA.results[b]);
+    return (ia < 0 ? 99 : ia) - (ib < 0 ? 99 : ib);
+  });
+}
+
+function computeCounts(fromMs, endMs) {
+  // ジョブごとの「結果コード -> 日別ビルド回数の配列」
+  const dates = [];
+  for (let t = fromMs; t < endMs; t += DAY_MS) dates.push(dayKey(t));
+  const perJob = DATA.builds.map((builds) => {
+    const byCode = new Map();
+    for (const [ts, code] of builds) {
+      if (ts < fromMs || ts >= endMs) continue;
+      const di = Math.floor((ts - fromMs) / DAY_MS);
+      if (!byCode.has(code)) byCode.set(code, new Array(dates.length).fill(0));
+      byCode.get(code)[di]++;
+    }
+    return byCode;
+  });
+  return { dates, perJob };
+}
+
 function computeHeatmap(fromMs, endMs) {
   const dates = [];
   for (let t = fromMs; t < endMs; t += DAY_MS) dates.push(dayKey(t));
@@ -228,8 +264,19 @@ const hmEl = document.getElementById("heatmap");
 hmEl.style.height = jobs.length * ROW_H_HM + 170 + "px";
 const hm = echarts.init(hmEl);
 
+// ジョブごとのミニ積み上げ棒 (small multiples) のレイアウト定数
+const CNT_ROW = 64;    // 1 ジョブあたりの行の高さ
+const CNT_BAR = 46;    // うちグラフ部分の高さ
+const CNT_TOP = 10;
+const CNT_BOTTOM = 70; // 最下段の日付ラベル分
+
+const cntEl = document.getElementById("counts");
+cntEl.style.height = CNT_TOP + jobs.length * CNT_ROW + CNT_BOTTOM + "px";
+const cnt = echarts.init(cntEl);
+
 let currentSpans = [];
 let currentDates = [];
+let currentCounts = { dates: [], perJob: [] };
 let stats = {};
 
 function timelineOption(fromMs, axisMax) {
@@ -364,6 +411,75 @@ function heatmapOption(values) {
   };
 }
 
+function countsOption(c) {
+  const grids = [], xAxes = [], yAxes = [], series = [], titles = [];
+  jobs.forEach((job, ji) => {
+    const top = CNT_TOP + ji * CNT_ROW;
+    const isLast = ji === jobs.length - 1;
+    grids.push({ left: 250, right: 30, top, height: CNT_BAR });
+    xAxes.push({
+      type: "category",
+      gridIndex: ji,
+      data: c.dates,
+      axisLabel: isLast ? { rotate: 45 } : { show: false },
+      axisTick: { show: false },
+    });
+    yAxes.push({
+      type: "value",
+      gridIndex: ji,
+      minInterval: 1, // 件数なので整数目盛り
+      splitNumber: 2,
+      axisLabel: { fontSize: 11 },
+    });
+    titles.push({
+      // Y 軸の目盛り数字 (グラフ左端 ~250px 付近) と重ならない位置に置く
+      text: job.length > 26 ? job.slice(0, 25) + "…" : job,
+      left: 200,
+      textAlign: "right",
+      top: top + CNT_BAR / 2 - 9,
+      textStyle: { fontSize: 12, fontWeight: "normal", color: "#455a64" },
+    });
+    for (const code of orderCodes(c.perJob[ji].keys())) {
+      series.push({
+        id: ji + ":" + DATA.results[code],
+        name: DATA.results[code],
+        type: "bar",
+        stack: "job" + ji,
+        xAxisIndex: ji,
+        yAxisIndex: ji,
+        data: c.perJob[ji].get(code),
+        barCategoryGap: "15%",
+        itemStyle: { color: COLORS[DATA.results[code]] || "#90a4ae" },
+      });
+    }
+  });
+  return {
+    animation: false,
+    tooltip: {
+      trigger: "item",
+      formatter: (p) => {
+        const ji = Number(p.seriesId.split(":")[0]);
+        const byCode = currentCounts.perJob[ji];
+        const parts = [];
+        let total = 0;
+        for (const code of orderCodes(byCode.keys())) {
+          const n = byCode.get(code)[p.dataIndex];
+          if (!n) continue;
+          parts.push(`${DATA.results[code]} ${n}`);
+          total += n;
+        }
+        return `<b>${jobs[ji]}</b><br>${currentCounts.dates[p.dataIndex]}<br>` +
+          `計 ${total} 回 (${parts.join(" / ")})`;
+      },
+    },
+    title: titles,
+    grid: grids,
+    xAxis: xAxes,
+    yAxis: yAxes,
+    series,
+  };
+}
+
 // ---- 期間選択 (カレンダー + プリセット) ----
 
 const fromInput = document.getElementById("from");
@@ -391,6 +507,8 @@ function render() {
   tl.setOption(timelineOption(fromMs, axisMax), true);
   trend.setOption(trendOption(computeTrends(fromMs, endMs), trendSelected), true);
   hm.setOption(heatmapOption(heat.values), true);
+  currentCounts = computeCounts(fromMs, endMs);
+  cnt.setOption(countsOption(currentCounts), true);
 
   const days = Math.round((endMs - fromMs) / DAY_MS);
   document.getElementById("meta").textContent =
@@ -422,7 +540,7 @@ for (const d of [7, 14, 30, 60, 90, 180, 365].filter((d) => d <= DATA.days)) {
 fromInput.value = MIN_DATE;
 toInput.value = MAX_DATE;
 render();
-window.addEventListener("resize", () => { tl.resize(); trend.resize(); hm.resize(); });
+window.addEventListener("resize", () => { tl.resize(); trend.resize(); hm.resize(); cnt.resize(); });
 </script>
 </body>
 </html>
