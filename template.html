@@ -11,6 +11,9 @@
   .meta { color: #78909c; font-size: 13px; }
   .period { font-size: 13px; margin: 12px 0; display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
   .period input[type="date"] { border: 1px solid #b0bec5; border-radius: 4px; padding: 3px 8px; font-size: 13px; color: #263238; }
+  .period input[type="text"] { border: 1px solid #b0bec5; border-radius: 4px; padding: 3px 8px; font-size: 13px; color: #263238; width: 240px; }
+  .period select { border: 1px solid #b0bec5; border-radius: 4px; padding: 3px 8px; font-size: 13px; color: #263238; background: #fff; }
+  .period label { display: flex; align-items: center; gap: 4px; margin-left: 6px; cursor: pointer; }
   .period .presets { margin-left: 12px; color: #78909c; }
   .period button { border: 1px solid #b0bec5; background: #fff; color: #455a64; padding: 4px 14px; margin-left: 6px; border-radius: 4px; cursor: pointer; font-size: 13px; }
   .period button.active { background: #607d8b; border-color: #607d8b; color: #fff; }
@@ -31,6 +34,17 @@
   <input type="date" id="to">
   <span class="presets">直近:</span>
   <span id="presets"></span>
+</div>
+<div class="period">
+  表示ジョブ:
+  <input type="text" id="job-search" placeholder="検索 (スペース区切りで OR)">
+  <label><input type="checkbox" id="failed-only"> 失敗があったジョブのみ</label>
+  並び順:
+  <select id="job-sort">
+    <option value="name">名前順</option>
+    <option value="fail">失敗率ワースト順</option>
+  </select>
+  <span class="presets" id="job-count"></span>
 </div>
 
 <h2>タイムライン(結果が同じだった期間の帯)</h2>
@@ -102,13 +116,41 @@ function daysAgo(n) {
 const MIN_DATE = dayKey(daysAgo(DATA.days - 1));
 const MAX_DATE = dayKey(DATA.now);
 
-// ---- 選択中の期間 [fromMs, endMs) に対する集計 ----
+// ---- 表示対象のジョブ (フィルタ・並び替え後) ----
+// viewIdx: DATA.jobs / DATA.builds に対する元 index の配列。viewJobs: その名前。
+let viewIdx = [];
+let viewJobs = [];
+
+function computeView(fromMs, endMs) {
+  const days = Math.round((endMs - fromMs) / DAY_MS);
+  const terms = document.getElementById("job-search").value
+    .trim().toLowerCase().split(/\s+/).filter(Boolean);
+  const failedOnly = document.getElementById("failed-only").checked;
+  const sortMode = document.getElementById("job-sort").value;
+
+  const items = [];
+  jobs.forEach((name, ji) => {
+    if (terms.length && !terms.some((t) => name.toLowerCase().includes(t))) return;
+    const { failMs, knownMs } = dailyFailTime(DATA.builds[ji], fromMs, days);
+    const fail = failMs.reduce((a, b) => a + b, 0);
+    const known = knownMs.reduce((a, b) => a + b, 0);
+    if (failedOnly && fail === 0) return;
+    items.push({ ji, name, rate: known ? fail / known : -1 });
+  });
+  if (sortMode === "fail") {
+    items.sort((a, b) => b.rate - a.rate || a.name.localeCompare(b.name));
+  }
+  viewIdx = items.map((x) => x.ji);
+  viewJobs = items.map((x) => x.name);
+}
+
+// ---- 選択中の期間 [fromMs, endMs) に対する集計 (表示対象のジョブのみ) ----
 
 function computeStats(fromMs, endMs) {
   const stats = {};
-  jobs.forEach((job, ji) => {
+  viewJobs.forEach((job, vi) => {
     let ok = 0, ng = 0, total = 0;
-    for (const [ts, code] of DATA.builds[ji]) {
+    for (const [ts, code] of DATA.builds[viewIdx[vi]]) {
       if (ts < fromMs || ts >= endMs) continue;
       total++;
       if (code === OK_CODE) ok++;
@@ -138,14 +180,14 @@ function jobRuns(builds) {
 }
 
 function computeSpans(fromMs, endMs) {
-  // 区間を [ジョブidx, 開始ms, 終了ms, 結果名] の帯にして表示範囲でクリップする。
+  // 区間を [表示行idx, 開始ms, 終了ms, 結果名] の帯にして表示範囲でクリップする。
   const spans = [];
-  DATA.builds.forEach((builds, ji) => {
-    for (const [start, end, code] of jobRuns(builds)) {
+  viewIdx.forEach((oji, vi) => {
+    for (const [start, end, code] of jobRuns(DATA.builds[oji])) {
       const s = Math.max(start, fromMs);
       const e = Math.min(end, endMs);
       if (e <= s) continue;
-      spans.push([ji, s, e, DATA.results[code]]);
+      spans.push([vi, s, e, DATA.results[code]]);
     }
   });
   return spans;
@@ -189,9 +231,9 @@ function computeCounts(fromMs, endMs) {
   // ジョブごとの「結果コード -> 日別ビルド回数の配列」
   const dates = [];
   for (let t = fromMs; t < endMs; t += DAY_MS) dates.push(dayKey(t));
-  const perJob = DATA.builds.map((builds) => {
+  const perJob = viewIdx.map((oji) => {
     const byCode = new Map();
-    for (const [ts, code] of builds) {
+    for (const [ts, code] of DATA.builds[oji]) {
       if (ts < fromMs || ts >= endMs) continue;
       const di = Math.floor((ts - fromMs) / DAY_MS);
       if (!byCode.has(code)) byCode.set(code, new Array(dates.length).fill(0));
@@ -207,11 +249,11 @@ function computeHeatmap(fromMs, endMs) {
   for (let t = fromMs; t < endMs; t += DAY_MS) dates.push(dayKey(t));
 
   const values = [];
-  DATA.builds.forEach((builds, ji) => {
-    const { failMs, knownMs } = dailyFailTime(builds, fromMs, dates.length);
+  viewIdx.forEach((oji, vi) => {
+    const { failMs, knownMs } = dailyFailTime(DATA.builds[oji], fromMs, dates.length);
     knownMs.forEach((known, di) => {
       if (!known) return; // 状態不明の日 (最初のビルドより前) は空白
-      values.push([di, ji, Math.round((failMs[di] / known) * 100), failMs[di], known]);
+      values.push([di, vi, Math.round((failMs[di] / known) * 100), failMs[di], known]);
     });
   });
   return { dates, values };
@@ -222,8 +264,8 @@ function computeTrends(fromMs, endMs) {
   // 状態が分からない日 (最初のビルドより前) は null (線が途切れる)。
   const dates = [];
   for (let t = fromMs; t < endMs; t += DAY_MS) dates.push(dayKey(t));
-  const perJob = jobs.map((job, ji) => {
-    const { failMs, knownMs } = dailyFailTime(DATA.builds[ji], fromMs, dates.length);
+  const perJob = viewJobs.map((job, vi) => {
+    const { failMs, knownMs } = dailyFailTime(DATA.builds[viewIdx[vi]], fromMs, dates.length);
     const rates = knownMs.map((known, di) =>
       known ? Math.round((failMs[di] / known) * 100) : null
     );
@@ -254,7 +296,7 @@ for (const ev of ["legendselectchanged", "legendselected", "legendunselected"]) 
 
 function setAllTrendSeries(on) {
   const type = on ? "legendSelect" : "legendUnSelect";
-  for (const job of jobs) trend.dispatchAction({ type, name: job });
+  for (const job of viewJobs) trend.dispatchAction({ type, name: job });
   trendSelected = trend.getOption().legend[0].selected;
 }
 document.getElementById("trend-all-on").addEventListener("click", () => setAllTrendSeries(true));
@@ -285,14 +327,14 @@ function timelineOption(fromMs, axisMax) {
       formatter: (p) => {
         const d = currentSpans[p.dataIndex];
         const hours = ((d[2] - d[1]) / 3600000).toFixed(1);
-        return `<b>${jobs[d[0]]}</b><br>${d[3]}<br>${fmt(d[1])} 〜 ${fmt(d[2])}<br>(${hours} 時間)`;
+        return `<b>${viewJobs[d[0]]}</b><br>${d[3]}<br>${fmt(d[1])} 〜 ${fmt(d[2])}<br>(${hours} 時間)`;
       },
     },
     grid: { left: 250, right: 30, top: 20, bottom: 40 },
     xAxis: { type: "time", min: fromMs, max: axisMax },
     yAxis: {
       type: "category",
-      data: jobs,
+      data: viewJobs,
       inverse: true,
       axisLabel: {
         margin: 12,
@@ -380,14 +422,14 @@ function heatmapOption(values) {
   return {
     tooltip: {
       formatter: (p) =>
-        `<b>${jobs[p.data[1]]}</b><br>${currentDates[p.data[0]]}<br>` +
+        `<b>${viewJobs[p.data[1]]}</b><br>${currentDates[p.data[0]]}<br>` +
         `失敗率 ${p.data[2]}% (失敗 ${hoursLabel(p.data[3])} / ${hoursLabel(p.data[4])})`,
     },
     grid: { left: 250, right: 30, top: 20, bottom: 110 },
     xAxis: { type: "category", data: currentDates, axisLabel: { rotate: 45 } },
     yAxis: {
       type: "category",
-      data: jobs,
+      data: viewJobs,
       inverse: true,
       axisLabel: { width: 230, overflow: "truncate" },
     },
@@ -413,9 +455,9 @@ function heatmapOption(values) {
 
 function countsOption(c) {
   const grids = [], xAxes = [], yAxes = [], series = [], titles = [];
-  jobs.forEach((job, ji) => {
+  viewJobs.forEach((job, ji) => {
     const top = CNT_TOP + ji * CNT_ROW;
-    const isLast = ji === jobs.length - 1;
+    const isLast = ji === viewJobs.length - 1;
     grids.push({ left: 250, right: 30, top, height: CNT_BAR });
     xAxes.push({
       type: "category",
@@ -468,7 +510,7 @@ function countsOption(c) {
           parts.push(`${DATA.results[code]} ${n}`);
           total += n;
         }
-        return `<b>${jobs[ji]}</b><br>${currentCounts.dates[p.dataIndex]}<br>` +
+        return `<b>${viewJobs[ji]}</b><br>${currentCounts.dates[p.dataIndex]}<br>` +
           `計 ${total} 回 (${parts.join(" / ")})`;
       },
     },
@@ -499,6 +541,14 @@ function render() {
   const endMs = parseDate(toInput.value) + DAY_MS; // 終了日の翌日 0 時 (排他)
   const axisMax = Math.min(endMs, DATA.now);       // 終了日が今日なら現在時刻まで
 
+  computeView(fromMs, endMs);
+  // 行数が変わるチャートの高さを表示ジョブ数に合わせる
+  tlEl.style.height = viewJobs.length * ROW_H_TL + 100 + "px";
+  trendEl.style.height = Math.max(300, viewJobs.length * 24 + 80) + "px";
+  hmEl.style.height = viewJobs.length * ROW_H_HM + 170 + "px";
+  cntEl.style.height = CNT_TOP + viewJobs.length * CNT_ROW + CNT_BOTTOM + "px";
+  tl.resize(); trend.resize(); hm.resize(); cnt.resize();
+
   stats = computeStats(fromMs, endMs);
   currentSpans = computeSpans(fromMs, Math.min(endMs, DATA.now));
   const heat = computeHeatmap(fromMs, endMs);
@@ -512,7 +562,10 @@ function render() {
 
   const days = Math.round((endMs - fromMs) / DAY_MS);
   document.getElementById("meta").textContent =
-    `生成: ${DATA.generated_at} / 表示期間: ${fromInput.value} 〜 ${toInput.value} (${days}日) / ジョブ数: ${jobs.length}`;
+    `生成: ${DATA.generated_at} / 表示期間: ${fromInput.value} 〜 ${toInput.value} (${days}日)` +
+    ` / 表示ジョブ: ${viewJobs.length} / ${jobs.length}`;
+  document.getElementById("job-count").textContent =
+    viewJobs.length === jobs.length ? `全 ${jobs.length} ジョブ` : `${viewJobs.length} / ${jobs.length} ジョブ`;
   document.querySelectorAll("#presets button").forEach((b) => {
     b.classList.toggle(
       "active",
@@ -523,6 +576,9 @@ function render() {
 
 fromInput.addEventListener("change", render);
 toInput.addEventListener("change", render);
+document.getElementById("job-search").addEventListener("input", render);
+document.getElementById("failed-only").addEventListener("change", render);
+document.getElementById("job-sort").addEventListener("change", render);
 
 const presetEl = document.getElementById("presets");
 for (const d of [7, 14, 30, 60, 90, 180, 365].filter((d) => d <= DATA.days)) {
