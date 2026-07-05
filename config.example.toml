@@ -1,0 +1,30 @@
+# config.toml にコピーして値を埋めてください
+# (config.toml は認証情報を含むため .gitignore 済み)
+
+[jenkins]
+url = "https://jenkins.example.com"
+user = "reader"
+# API トークン。ここに書く代わりに環境変数 JENKINS_TOKEN でも渡せる
+token = ""
+
+[jobs]
+# 集計対象のジョブを正規表現で指定する (fullName に対する部分一致)。
+# 完全一致にしたい場合は ^$ でアンカーする。
+# - include が空 (または未指定) なら全ジョブが対象
+# - exclude は include より優先される
+# - collect.py の収集対象と report.py の集計対象の両方に適用される。
+#   除外したジョブはそもそも収集されない (Jenkins 側の履歴が消えると遡れない)
+#   ため、後で対象を広げる可能性があるなら絞りすぎに注意
+# 例: include = ["^app/", "nightly$"]
+#     exclude = ["sandbox", "-test-"]
+include = []
+exclude = []
+
+[db]
+path = "jenkins.db"
+
+[report]
+# レポートに含める最大期間(日数)。レポート上のボタンでこの範囲内の
+# 期間 (7/14/30/... 日) に切り替えて表示できる
+days = 60
+output = "report.html"

@@ -1,0 +1,86 @@
+# JenkinsGraph
+
+Jenkins のビルド履歴を定期収集して SQLite に蓄積し、静的 HTML レポート
+(失敗期間のタイムライン + 日別失敗率ヒートマップ) を生成するツール。
+
+```
+cron ──> collect.py ──> jenkins.db (SQLite) ──> report.py ──> report.html
+          (差分取得)                              (集計 + ECharts 埋め込み)
+```
+
+Jenkins はビルド履歴をローテーションで破棄するため、履歴が消える前に
+自前 DB へ写し続けるのがこの構成の肝。集計はレポート生成時に行うので、
+表示要件が変わっても再収集は不要。
+
+## セットアップ
+
+Python 3.11 以上 (tomllib を使用)。
+
+```sh
+python -m venv .venv
+.venv/bin/pip install -r requirements.txt   # Windows: .venv\Scripts\pip
+cp config.example.toml config.toml
+# config.toml に Jenkins の URL / ユーザー / API トークンを記入
+```
+
+API トークンは Jenkins の「ユーザー設定 > API トークン」で発行した
+読み取り専用ユーザーのものを推奨。`config.toml` に書きたくない場合は
+環境変数 `JENKINS_TOKEN` でも渡せる。
+
+## 使い方
+
+```sh
+python collect.py   # Jenkins からビルド履歴を差分取得して DB に蓄積
+python report.py    # DB を集計して report.html を生成
+```
+
+`report.html` は単一ファイルなので、ブラウザで直接開くか、
+ファイルサーバー・S3 などに置いて共有する。
+
+### cron 設定例 (1 時間ごと)
+
+```cron
+0 * * * * cd /path/to/JenkinsGraph && .venv/bin/python collect.py && .venv/bin/python report.py >> collect.log 2>&1
+```
+
+Windows ならタスクスケジューラで同等のコマンドを登録する。
+
+## レポートの見方
+
+- **表示期間**: ページ上部のカレンダーで開始日・終了日を自由に指定できる
+  (集計はブラウザ側で行うため再生成は不要)。「直近 7日/14日/...」ボタンは
+  日付を埋めるショートカット。選択できる範囲はレポートに埋め込んだ
+  `report.days` 日分まで。
+- **タイムライン**: ジョブごとに 1 行。同じ結果が続いた期間が 1 本の帯になる。
+  失敗の帯は「最初に失敗したビルド〜次に結果が変わったビルド」の区間で、
+  失敗したまま次のビルドがないジョブは現在時刻まで赤く伸びる。
+  ジョブ名の下に表示期間内の成功/失敗のパーセントとビルド数が出る。
+- **失敗率の推移**: ジョブごとの日別失敗率の折れ線グラフ。
+  凡例クリックで表示の ON/OFF を切り替えられる (期間を変えても維持される)。
+- **ヒートマップ**: ジョブ × 日のマス目。色は当日の失敗率 (%)。
+
+日別失敗率は「その日のうち失敗状態だった時間の割合」。タイムラインの帯と
+同じく、失敗ビルドから次に結果が変わるビルドまでを失敗期間とみなして
+1 日 (24 時間) との重なりで計算する。当日など 1 日が終わっていない分や、
+ジョブの最初のビルドより前の時間は「状態不明」として分母から除く
+(状態不明しかない日は推移グラフでは線が途切れ、ヒートマップでは空白)。
+
+## 補足・チューニング
+
+- 集計対象のジョブは `config.toml` の `[jobs]` セクションで正規表現で
+  絞り込める (`include` / `exclude`、fullName に対する部分一致)。
+  `include` が空なら全ジョブ、`exclude` が優先。フィルタは collect.py の
+  収集対象にも適用されるため、除外したジョブは収集されない点に注意
+  (Jenkins 側の履歴が消えると遡って取得できない)。
+- 「失敗」の定義は `report.py` の `FAIL_RESULTS` (既定: FAILURE と UNSTABLE)。
+  UNSTABLE を成功扱いにしたい場合はここを変更する。
+- レポートに含める最大期間は `config.toml` の `report.days` (既定 60 日)。
+  埋め込むデータ量もこれに比例するので、長くしすぎると HTML が重くなる。
+- 差分取得に使う Jenkins API の `builds` フィールドは直近 100 件しか
+  返さない。実行間隔の間に 1 ジョブが 100 回以上ビルドされる環境では
+  実行頻度を上げること (初回のみ `allBuilds` で全履歴を取得する)。
+- フォルダ / マルチブランチパイプラインは再帰的にたどる
+  (`collect.py` の `CONTAINER_CLASS_KEYWORDS` で判定)。
+- `template.html` は ECharts を CDN から読み込むため、レポート閲覧時に
+  インターネット接続が必要。オフライン環境では echarts.min.js を
+  ローカルに置いて `<script src>` を書き換える。

@@ -1,0 +1,6 @@
+config.toml
+jenkins.db
+report.html
+.claude/
+__pycache__/
+.venv/

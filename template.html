@@ -1,0 +1,428 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<title>Jenkins ジョブ失敗レポート</title>
+<script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
+<style>
+  body { font-family: "Segoe UI", "Hiragino Sans", "Meiryo", sans-serif; margin: 24px; color: #263238; background: #fff; }
+  h1 { font-size: 22px; }
+  h2 { font-size: 17px; margin-top: 36px; border-left: 4px solid #607d8b; padding-left: 8px; }
+  .meta { color: #78909c; font-size: 13px; }
+  .period { font-size: 13px; margin: 12px 0; display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
+  .period input[type="date"] { border: 1px solid #b0bec5; border-radius: 4px; padding: 3px 8px; font-size: 13px; color: #263238; }
+  .period .presets { margin-left: 12px; color: #78909c; }
+  .period button { border: 1px solid #b0bec5; background: #fff; color: #455a64; padding: 4px 14px; margin-left: 6px; border-radius: 4px; cursor: pointer; font-size: 13px; }
+  .period button.active { background: #607d8b; border-color: #607d8b; color: #fff; }
+  .chart-tools { margin: 0 0 4px; }
+  .chart-tools button { border: 1px solid #b0bec5; background: #fff; color: #455a64; padding: 2px 10px; margin-right: 6px; border-radius: 4px; cursor: pointer; font-size: 12px; }
+  .legend { font-size: 13px; margin: 4px 0 8px; }
+  .legend span { display: inline-block; margin-right: 16px; }
+  .legend i { display: inline-block; width: 12px; height: 12px; border-radius: 2px; margin-right: 4px; vertical-align: -1px; }
+</style>
+</head>
+<body>
+<h1>Jenkins ジョブ失敗レポート</h1>
+<p class="meta" id="meta"></p>
+<div class="period">
+  表示期間:
+  <input type="date" id="from">
+  〜
+  <input type="date" id="to">
+  <span class="presets">直近:</span>
+  <span id="presets"></span>
+</div>
+
+<h2>タイムライン(結果が同じだった期間の帯)</h2>
+<div class="legend">
+  <span><i style="background:#66bb6a"></i>SUCCESS</span>
+  <span><i style="background:#e53935"></i>FAILURE</span>
+  <span><i style="background:#ffa726"></i>UNSTABLE</span>
+  <span><i style="background:#bdbdbd"></i>ABORTED</span>
+</div>
+<div id="timeline"></div>
+
+<h2>日別失敗率の推移 — 1日のうち失敗状態だった時間の割合(凡例クリックでジョブの表示 ON/OFF)</h2>
+<div class="chart-tools">
+  <button id="trend-all-on">全て表示</button>
+  <button id="trend-all-off">全て非表示</button>
+</div>
+<div id="trend"></div>
+
+<h2>日別ヒートマップ — 1日のうち失敗状態だった時間の割合(%)</h2>
+<div id="heatmap"></div>
+
+<script>
+const DATA = __DATA__;
+
+const COLORS = {
+  SUCCESS: "#66bb6a",
+  FAILURE: "#e53935",
+  UNSTABLE: "#ffa726",
+  ABORTED: "#bdbdbd",
+  NOT_BUILT: "#e0e0e0",
+};
+const jobs = DATA.jobs;
+const OK_CODE = DATA.results.indexOf("SUCCESS");
+const FAIL_CODES = new Set(
+  DATA.fail_results.map((r) => DATA.results.indexOf(r)).filter((i) => i >= 0)
+);
+const DAY_MS = 86400000;
+const fmt = (t) => new Date(t).toLocaleString("ja-JP");
+
+function dayKey(ts) {
+  const d = new Date(ts);
+  const p = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+}
+
+// "YYYY-MM-DD" → その日のローカル 0 時のエポックミリ秒
+function parseDate(value) {
+  const [y, m, d] = value.split("-").map(Number);
+  return new Date(y, m - 1, d).getTime();
+}
+
+function daysAgo(n) {
+  const d = new Date(DATA.now);
+  d.setHours(0, 0, 0, 0);
+  d.setDate(d.getDate() - n);
+  return d.getTime();
+}
+
+// 埋め込みデータがある範囲 (日付入力の min/max)
+const MIN_DATE = dayKey(daysAgo(DATA.days - 1));
+const MAX_DATE = dayKey(DATA.now);
+
+// ---- 選択中の期間 [fromMs, endMs) に対する集計 ----
+
+function computeStats(fromMs, endMs) {
+  const stats = {};
+  jobs.forEach((job, ji) => {
+    let ok = 0, ng = 0, total = 0;
+    for (const [ts, code] of DATA.builds[ji]) {
+      if (ts < fromMs || ts >= endMs) continue;
+      total++;
+      if (code === OK_CODE) ok++;
+      else if (FAIL_CODES.has(code)) ng++;
+    }
+    stats[job] = {
+      total,
+      okPct: total ? Math.round((ok / total) * 100) : 0,
+      ngPct: total ? Math.round((ng / total) * 100) : 0,
+    };
+  });
+  return stats;
+}
+
+// ジョブの「同じ結果が続いた区間」を [開始ms, 終了ms, 結果コード] で返す。
+// 区間の終了は次に結果が変わったビルドの開始時刻、最後の区間は現在時刻まで。
+function jobRuns(builds) {
+  const changes = [];
+  for (const [ts, code] of builds) {
+    if (!changes.length || changes[changes.length - 1][1] !== code) changes.push([ts, code]);
+  }
+  return changes.map(([start, code], i) => [
+    start,
+    i + 1 < changes.length ? changes[i + 1][0] : DATA.now,
+    code,
+  ]);
+}
+
+function computeSpans(fromMs, endMs) {
+  // 区間を [ジョブidx, 開始ms, 終了ms, 結果名] の帯にして表示範囲でクリップする。
+  const spans = [];
+  DATA.builds.forEach((builds, ji) => {
+    for (const [start, end, code] of jobRuns(builds)) {
+      const s = Math.max(start, fromMs);
+      const e = Math.min(end, endMs);
+      if (e <= s) continue;
+      spans.push([ji, s, e, DATA.results[code]]);
+    }
+  });
+  return spans;
+}
+
+// 日ごとの [失敗していた時間, 状態が分かっている時間] (ミリ秒)。
+// 「失敗していた時間」は失敗区間とその日の重なり。最初のビルドより前や
+// 未来の時間帯は「状態不明」として分母に含めない。
+function dailyFailTime(builds, fromMs, days) {
+  const failMs = new Array(days).fill(0);
+  const knownMs = new Array(days).fill(0);
+  const endMs = Math.min(fromMs + days * DAY_MS, DATA.now);
+  for (const [start, end, code] of jobRuns(builds)) {
+    let s = Math.max(start, fromMs);
+    const e = Math.min(end, endMs);
+    const fail = FAIL_CODES.has(code);
+    while (s < e) {
+      const di = Math.floor((s - fromMs) / DAY_MS);
+      const chunk = Math.min(e, fromMs + (di + 1) * DAY_MS) - s;
+      knownMs[di] += chunk;
+      if (fail) failMs[di] += chunk;
+      s += chunk;
+    }
+  }
+  return { failMs, knownMs };
+}
+
+const hoursLabel = (ms) => (ms / 3600000).toFixed(1) + "h";
+
+function computeHeatmap(fromMs, endMs) {
+  const dates = [];
+  for (let t = fromMs; t < endMs; t += DAY_MS) dates.push(dayKey(t));
+
+  const values = [];
+  DATA.builds.forEach((builds, ji) => {
+    const { failMs, knownMs } = dailyFailTime(builds, fromMs, dates.length);
+    knownMs.forEach((known, di) => {
+      if (!known) return; // 状態不明の日 (最初のビルドより前) は空白
+      values.push([di, ji, Math.round((failMs[di] / known) * 100), failMs[di], known]);
+    });
+  });
+  return { dates, values };
+}
+
+function computeTrends(fromMs, endMs) {
+  // ジョブごとの「1 日のうち失敗状態だった時間の割合」。
+  // 状態が分からない日 (最初のビルドより前) は null (線が途切れる)。
+  const dates = [];
+  for (let t = fromMs; t < endMs; t += DAY_MS) dates.push(dayKey(t));
+  const perJob = jobs.map((job, ji) => {
+    const { failMs, knownMs } = dailyFailTime(DATA.builds[ji], fromMs, dates.length);
+    const rates = knownMs.map((known, di) =>
+      known ? Math.round((failMs[di] / known) * 100) : null
+    );
+    return { name: job, rates, failMs, knownMs };
+  });
+  return { dates, perJob };
+}
+
+// ---- チャート ----
+
+const ROW_H_TL = 40; // タイムラインはラベル 2 行分
+const ROW_H_HM = 28;
+
+const tlEl = document.getElementById("timeline");
+tlEl.style.height = jobs.length * ROW_H_TL + 100 + "px";
+const tl = echarts.init(tlEl);
+
+const trendEl = document.getElementById("trend");
+// 左の縦並び凡例が全ジョブ収まる高さを確保する
+trendEl.style.height = Math.max(300, jobs.length * 24 + 80) + "px";
+const trend = echarts.init(trendEl);
+let trendSelected = {}; // 凡例の ON/OFF 状態 (期間切り替え後も維持する)
+// クリックは legendselectchanged、legendSelect/legendUnSelect アクションは
+// 別イベントになるためすべて監視する
+for (const ev of ["legendselectchanged", "legendselected", "legendunselected"]) {
+  trend.on(ev, (e) => { trendSelected = e.selected; });
+}
+
+function setAllTrendSeries(on) {
+  const type = on ? "legendSelect" : "legendUnSelect";
+  for (const job of jobs) trend.dispatchAction({ type, name: job });
+  trendSelected = trend.getOption().legend[0].selected;
+}
+document.getElementById("trend-all-on").addEventListener("click", () => setAllTrendSeries(true));
+document.getElementById("trend-all-off").addEventListener("click", () => setAllTrendSeries(false));
+
+const hmEl = document.getElementById("heatmap");
+hmEl.style.height = jobs.length * ROW_H_HM + 170 + "px";
+const hm = echarts.init(hmEl);
+
+let currentSpans = [];
+let currentDates = [];
+let stats = {};
+
+function timelineOption(fromMs, axisMax) {
+  return {
+    tooltip: {
+      formatter: (p) => {
+        const d = currentSpans[p.dataIndex];
+        const hours = ((d[2] - d[1]) / 3600000).toFixed(1);
+        return `<b>${jobs[d[0]]}</b><br>${d[3]}<br>${fmt(d[1])} 〜 ${fmt(d[2])}<br>(${hours} 時間)`;
+      },
+    },
+    grid: { left: 250, right: 30, top: 20, bottom: 40 },
+    xAxis: { type: "time", min: fromMs, max: axisMax },
+    yAxis: {
+      type: "category",
+      data: jobs,
+      inverse: true,
+      axisLabel: {
+        margin: 12,
+        formatter: (job) => {
+          // rich テキストは overflow truncate が効かないため文字数で切り詰める
+          const name = job.length > 34 ? job.slice(0, 33) + "…" : job;
+          const s = stats[job];
+          if (!s || !s.total) return `{name|${name}}\n{dim|期間内ビルドなし}`;
+          return `{name|${name}}\n{ok|成功 ${s.okPct}%}{sep| / }{ng|失敗 ${s.ngPct}%}{dim| (${s.total}件)}`;
+        },
+        rich: {
+          name: { align: "right", color: "#263238", lineHeight: 18 },
+          ok: { color: "#2e7d32", fontSize: 11, lineHeight: 14 },
+          sep: { color: "#90a4ae", fontSize: 11, lineHeight: 14 },
+          ng: { color: "#c62828", fontSize: 11, lineHeight: 14 },
+          dim: { color: "#90a4ae", fontSize: 11, lineHeight: 14 },
+        },
+      },
+    },
+    series: [{
+      type: "custom",
+      encode: { x: [1, 2], y: 0 },
+      data: currentSpans,
+      renderItem: (params, api) => {
+        const y = api.coord([api.value(1), api.value(0)])[1];
+        const x1 = api.coord([api.value(1), 0])[0];
+        const x2 = api.coord([api.value(2), 0])[0];
+        const h = Math.min(api.size([0, 1])[1] * 0.5, 18);
+        const rect = echarts.graphic.clipRectByRect(
+          { x: x1, y: y - h / 2, width: Math.max(x2 - x1, 1), height: h },
+          { x: params.coordSys.x, y: params.coordSys.y, width: params.coordSys.width, height: params.coordSys.height }
+        );
+        return rect && {
+          type: "rect",
+          shape: rect,
+          style: { fill: COLORS[currentSpans[params.dataIndex][3]] || "#90a4ae" },
+        };
+      },
+    }],
+  };
+}
+
+function trendOption(t, selected) {
+  const timeByJob = new Map(t.perJob.map((j) => [j.name, j]));
+  return {
+    tooltip: {
+      trigger: "axis",
+      formatter: (ps) => {
+        const lines = [ps[0].name];
+        for (const p of ps) {
+          if (p.value == null) continue;
+          const j = timeByJob.get(p.seriesName);
+          lines.push(
+            `${p.marker}${p.seriesName}: ${p.value}%` +
+            ` (失敗 ${hoursLabel(j.failMs[p.dataIndex])} / ${hoursLabel(j.knownMs[p.dataIndex])})`
+          );
+        }
+        return lines.length > 1 ? lines.join("<br>") : `${ps[0].name}<br>データなし`;
+      },
+    },
+    animation: false, // ON/OFF 切り替え時のアニメーションなし
+    legend: {
+      type: "scroll", // ジョブが多いときは矢印でスクロール
+      orient: "vertical",
+      left: 0,
+      top: "middle",
+      selected, // クリックで ON/OFF、期間を変えても状態を引き継ぐ
+      formatter: (name) => (name.length > 20 ? name.slice(0, 19) + "…" : name),
+    },
+    // 他のチャートと X 軸位置を揃えるため left を合わせる (左は凡例のスペース)
+    grid: { left: 250, right: 30, top: 20, bottom: 70 },
+    xAxis: { type: "category", data: t.dates, boundaryGap: false, axisLabel: { rotate: 45 } },
+    yAxis: { type: "value", min: 0, max: 100, axisLabel: { formatter: "{value}%" } },
+    series: t.perJob.map((j) => ({
+      name: j.name,
+      type: "line",
+      data: j.rates,
+      connectNulls: false,
+      symbolSize: 4,
+    })),
+  };
+}
+
+function heatmapOption(values) {
+  return {
+    tooltip: {
+      formatter: (p) =>
+        `<b>${jobs[p.data[1]]}</b><br>${currentDates[p.data[0]]}<br>` +
+        `失敗率 ${p.data[2]}% (失敗 ${hoursLabel(p.data[3])} / ${hoursLabel(p.data[4])})`,
+    },
+    grid: { left: 250, right: 30, top: 20, bottom: 110 },
+    xAxis: { type: "category", data: currentDates, axisLabel: { rotate: 45 } },
+    yAxis: {
+      type: "category",
+      data: jobs,
+      inverse: true,
+      axisLabel: { width: 230, overflow: "truncate" },
+    },
+    visualMap: {
+      min: 0,
+      max: 100,
+      dimension: 2,
+      calculable: false, // 絞り込みスライダーなしの凡例のみ
+      hoverLink: false,
+      orient: "horizontal",
+      left: "center",
+      bottom: 10,
+      text: ["100%", "0%"],
+      inRange: { color: ["#e8f5e9", "#fff59d", "#ef5350", "#b71c1c"] },
+    },
+    series: [{
+      type: "heatmap",
+      data: values,
+      itemStyle: { borderColor: "#fff", borderWidth: 1 },
+    }],
+  };
+}
+
+// ---- 期間選択 (カレンダー + プリセット) ----
+
+const fromInput = document.getElementById("from");
+const toInput = document.getElementById("to");
+fromInput.min = toInput.min = MIN_DATE;
+fromInput.max = toInput.max = MAX_DATE;
+
+function render() {
+  // 入力をデータ範囲に収め、開始 > 終了なら開始に合わせる
+  if (!fromInput.value) fromInput.value = MIN_DATE;
+  if (!toInput.value) toInput.value = MAX_DATE;
+  if (fromInput.value < MIN_DATE) fromInput.value = MIN_DATE;
+  if (toInput.value > MAX_DATE) toInput.value = MAX_DATE;
+  if (fromInput.value > toInput.value) toInput.value = fromInput.value;
+
+  const fromMs = parseDate(fromInput.value);
+  const endMs = parseDate(toInput.value) + DAY_MS; // 終了日の翌日 0 時 (排他)
+  const axisMax = Math.min(endMs, DATA.now);       // 終了日が今日なら現在時刻まで
+
+  stats = computeStats(fromMs, endMs);
+  currentSpans = computeSpans(fromMs, Math.min(endMs, DATA.now));
+  const heat = computeHeatmap(fromMs, endMs);
+  currentDates = heat.dates;
+
+  tl.setOption(timelineOption(fromMs, axisMax), true);
+  trend.setOption(trendOption(computeTrends(fromMs, endMs), trendSelected), true);
+  hm.setOption(heatmapOption(heat.values), true);
+
+  const days = Math.round((endMs - fromMs) / DAY_MS);
+  document.getElementById("meta").textContent =
+    `生成: ${DATA.generated_at} / 表示期間: ${fromInput.value} 〜 ${toInput.value} (${days}日) / ジョブ数: ${jobs.length}`;
+  document.querySelectorAll("#presets button").forEach((b) => {
+    b.classList.toggle(
+      "active",
+      toInput.value === MAX_DATE && fromInput.value === dayKey(daysAgo(Number(b.dataset.days) - 1))
+    );
+  });
+}
+
+fromInput.addEventListener("change", render);
+toInput.addEventListener("change", render);
+
+const presetEl = document.getElementById("presets");
+for (const d of [7, 14, 30, 60, 90, 180, 365].filter((d) => d <= DATA.days)) {
+  const btn = document.createElement("button");
+  btn.textContent = `${d}日`;
+  btn.dataset.days = d;
+  btn.addEventListener("click", () => {
+    fromInput.value = dayKey(daysAgo(d - 1));
+    toInput.value = MAX_DATE;
+    render();
+  });
+  presetEl.appendChild(btn);
+}
+
+fromInput.value = MIN_DATE;
+toInput.value = MAX_DATE;
+render();
+window.addEventListener("resize", () => { tl.resize(); trend.resize(); hm.resize(); });
+</script>
+</body>
+</html>
