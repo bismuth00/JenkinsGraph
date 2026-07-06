@@ -24,8 +24,12 @@ FAIL_RESULTS = ["FAILURE", "UNSTABLE"]
 
 def load_builds(db_path):
     conn = sqlite3.connect(db_path)
+    # queuing カラムは後から追加されたもの。collect.py 未実行の古い DB では 0 扱い
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(builds)")}
+    queuing = "queuing" if "queuing" in cols else "0"
     return conn.execute(
-        "SELECT job_name, result, timestamp FROM builds ORDER BY job_name, timestamp"
+        f"SELECT job_name, result, timestamp, duration, {queuing} FROM builds"
+        " ORDER BY job_name, timestamp"
     ).fetchall()
 
 
@@ -33,7 +37,7 @@ def select_jobs(rows, window_start_ms):
     """表示対象のジョブ: 期間内にビルドがあるか、最新の結果が失敗のままのジョブ。"""
     last_result = {}
     in_window = set()
-    for job, result, ts in rows:
+    for job, result, ts, *_ in rows:
         last_result[job] = result
         if ts >= window_start_ms:
             in_window.add(job)
@@ -41,7 +45,8 @@ def select_jobs(rows, window_start_ms):
 
 
 def encode_builds(rows, jobs, window_start_ms):
-    """ジョブごとの [timestamp, 結果コード] 配列と、コード→結果名の対応表を作る。
+    """ジョブごとの [timestamp, 結果コード, duration, queuing] 配列と、
+    コード→結果名の対応表を作る。
 
     期間開始時点でどの状態だったか分かるよう、期間より前のビルドも
     直近の 1 件だけ含める。結果名は数値コードに置き換えてサイズを抑える。
@@ -49,17 +54,17 @@ def encode_builds(rows, jobs, window_start_ms):
     job_index = {j: i for i, j in enumerate(jobs)}
     result_codes = {}
     by_job = defaultdict(list)
-    for job, result, ts in rows:
+    for job, result, ts, dur, queuing in rows:
         if job not in job_index:
             continue
         code = result_codes.setdefault(result, len(result_codes))
-        by_job[job].append([ts, code])
+        by_job[job].append([ts, code, dur, queuing])
 
     builds = []
     for job in jobs:
         items = by_job[job]
         first_in = next(
-            (i for i, (ts, _) in enumerate(items) if ts >= window_start_ms), len(items)
+            (i for i, b in enumerate(items) if b[0] >= window_start_ms), len(items)
         )
         builds.append(items[max(first_in - 1, 0):])
 

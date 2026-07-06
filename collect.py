@@ -19,11 +19,19 @@ CREATE TABLE IF NOT EXISTS builds (
     job_name  TEXT    NOT NULL,
     number    INTEGER NOT NULL,
     result    TEXT    NOT NULL,  -- SUCCESS / FAILURE / UNSTABLE / ABORTED / NOT_BUILT
-    timestamp INTEGER NOT NULL,  -- ビルド開始時刻 (エポックミリ秒)
-    duration  INTEGER NOT NULL,  -- 所要時間 (ミリ秒)
+    timestamp INTEGER NOT NULL,  -- スケジュール時刻 = キュー投入時刻 (エポックミリ秒)
+    duration  INTEGER NOT NULL,  -- 実行の所要時間 (ミリ秒)
+    queuing   INTEGER NOT NULL DEFAULT 0,  -- キュー待ち時間 (ミリ秒)。実行開始は timestamp + queuing
     PRIMARY KEY (job_name, number)
 );
 """
+
+
+def migrate(conn):
+    """既存 DB に後から追加したカラムを補う。"""
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(builds)")}
+    if "queuing" not in cols:
+        conn.execute("ALTER TABLE builds ADD COLUMN queuing INTEGER NOT NULL DEFAULT 0")
 
 # _class にこれらを含むものはジョブではなくコンテナとして再帰的にたどる
 CONTAINER_CLASS_KEYWORDS = ("Folder", "MultiBranchProject", "OrganizationFolder")
@@ -63,11 +71,14 @@ def fetch_new_builds(session, job_url, since_number):
 
     2 回目以降に使う builds フィールドは直近 100 件しか返さないため、
     実行間隔はジョブのビルド頻度に対して十分短くすること。
+
+    キュー待ち時間は Metrics プラグインが付与する TimeInQueueAction の
+    queuingDurationMillis から取る。プラグインがない環境では 0 になる。
     """
     field = "allBuilds" if since_number is None else "builds"
     res = session.get(
         job_url + "api/json",
-        params={"tree": f"{field}[number,result,timestamp,duration]"},
+        params={"tree": f"{field}[number,result,timestamp,duration,actions[queuingDurationMillis]]"},
         timeout=120,
     )
     res.raise_for_status()
@@ -76,6 +87,11 @@ def fetch_new_builds(session, job_url, since_number):
             continue
         if since_number is not None and b["number"] <= since_number:
             continue
+        b["queuing"] = next(
+            (a["queuingDurationMillis"] for a in b.get("actions") or []
+             if a and "queuingDurationMillis" in a),
+            0,
+        )
         yield b
 
 
@@ -87,6 +103,7 @@ def main():
 
     conn = sqlite3.connect(cfg["db"]["path"])
     conn.executescript(SCHEMA)
+    migrate(conn)
 
     session = requests.Session()
     session.auth = (cfg["jenkins"]["user"], cfg["jenkins"]["token"])
@@ -101,8 +118,9 @@ def main():
         ).fetchone()[0]
         builds = list(fetch_new_builds(session, url, since))
         conn.executemany(
-            "INSERT OR IGNORE INTO builds VALUES (?, ?, ?, ?, ?)",
-            [(name, b["number"], b["result"], b["timestamp"], b["duration"]) for b in builds],
+            "INSERT OR IGNORE INTO builds VALUES (?, ?, ?, ?, ?, ?)",
+            [(name, b["number"], b["result"], b["timestamp"], b["duration"], b["queuing"])
+             for b in builds],
         )
         conn.commit()
         if builds:

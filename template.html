@@ -9,6 +9,9 @@
   h1 { font-size: 22px; }
   h2 { font-size: 17px; margin-top: 36px; border-left: 4px solid #607d8b; padding-left: 8px; }
   .meta { color: #78909c; font-size: 13px; }
+  .tabs { border-bottom: 2px solid #cfd8dc; margin: 16px 0 12px; }
+  .tabs button { border: none; background: none; color: #78909c; padding: 8px 20px; font-size: 14px; cursor: pointer; border-bottom: 2px solid transparent; margin-bottom: -2px; }
+  .tabs button.active { color: #263238; font-weight: bold; border-bottom-color: #607d8b; }
   .period { font-size: 13px; margin: 12px 0; display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
   .period input[type="date"] { border: 1px solid #b0bec5; border-radius: 4px; padding: 3px 8px; font-size: 13px; color: #263238; }
   .period input[type="text"] { border: 1px solid #b0bec5; border-radius: 4px; padding: 3px 8px; font-size: 13px; color: #263238; width: 240px; }
@@ -27,6 +30,13 @@
 <body>
 <h1>Jenkins ジョブ失敗レポート</h1>
 <p class="meta" id="meta"></p>
+
+<div class="tabs">
+  <button id="tab-overview" class="active">概要</button>
+  <button id="tab-detail">詳細タイムライン</button>
+</div>
+
+<div id="view-overview">
 <div class="period">
   表示期間:
   <input type="date" id="from">
@@ -66,6 +76,26 @@
 
 <h2>日別ヒートマップ — ビルドの失敗率</h2>
 <div id="heatmap"></div>
+</div>
+
+<div id="view-detail" style="display: none;">
+<div class="period">
+  日付:
+  <button id="prev-day">← 前日</button>
+  <input type="date" id="detail-date">
+  <button id="next-day">翌日 →</button>
+</div>
+<h2>詳細タイムライン</h2>
+<div class="legend">
+  <span><i style="background:#66bb6a"></i>SUCCESS</span>
+  <span><i style="background:#e53935"></i>FAILURE</span>
+  <span><i style="background:#ffa726"></i>UNSTABLE</span>
+  <span><i style="background:#bdbdbd"></i>ABORTED</span>
+  <span style="margin-left:12px;"><i style="background:#2e7d32"></i><i style="background:#b71c1c"></i><i style="background:#ef6c00"></i><i style="background:#757575"></i>ビルド実行中(結果の濃色)</span>
+  <span><i style="background:#90caf9"></i>キュー待ち</span>
+</div>
+<div id="detail"></div>
+</div>
 
 <script>
 const DATA = __DATA__;
@@ -77,6 +107,15 @@ const COLORS = {
   ABORTED: "#bdbdbd",
   NOT_BUILT: "#e0e0e0",
 };
+// ビルド実行中の表示色 (結果の色の濃い版)
+const DARK_COLORS = {
+  SUCCESS: "#2e7d32",
+  FAILURE: "#b71c1c",
+  UNSTABLE: "#ef6c00",
+  ABORTED: "#757575",
+  NOT_BUILT: "#9e9e9e",
+};
+const QUEUE_COLOR = "#90caf9"; // キュー待ち (結果と無関係なので独立した色)
 const jobs = DATA.jobs;
 const OK_CODE = DATA.results.indexOf("SUCCESS");
 const FAIL_CODES = new Set(
@@ -544,6 +583,7 @@ function render() {
       toInput.value === MAX_DATE && fromInput.value === dayKey(daysAgo(Number(b.dataset.days) - 1))
     );
   });
+  renderDetail(); // 絞り込み・並び順の変更を詳細タイムラインにも反映
 }
 
 fromInput.addEventListener("change", render);
@@ -565,10 +605,215 @@ for (const d of [7, 14, 30, 60, 90, 180, 365].filter((d) => d <= DATA.days)) {
   presetEl.appendChild(btn);
 }
 
+// ---- 詳細タイムライン (1 日単位、ビルド実行と待機状態) ----
+
+const detailEl = document.getElementById("detail");
+const detailDate = document.getElementById("detail-date");
+detailDate.min = MIN_DATE;
+detailDate.max = MAX_DATE;
+detailDate.value = MAX_DATE;
+let detailChart = null; // タブを開いたときに初期化 (非表示中は幅が取れないため)
+let currentDetail = [];
+let detailStats = {}; // ジョブ名 -> その日の時間内訳とビルド数
+
+// その日の時間内訳 (状態別の待機 / 実行 / キュー待ち) とビルド回数・結果数を集計する
+function computeDetailStats(dayStart, dayEnd) {
+  const stats = {};
+  viewJobs.forEach((job) => {
+    stats[job] = { idle: {}, run: 0, queue: 0, known: 0, builds: 0, counts: {} };
+  });
+  for (const [vi, s, e, res, kind] of currentDetail) {
+    const st = stats[viewJobs[vi]];
+    const ms = e - s;
+    st.known += ms;
+    if (kind === "run") st.run += ms;
+    else if (kind === "queue") st.queue += ms;
+    else st.idle[res] = (st.idle[res] || 0) + ms;
+  }
+  viewIdx.forEach((oji, vi) => {
+    const st = stats[viewJobs[vi]];
+    for (const [ts, code] of DATA.builds[oji]) {
+      if (ts < dayStart || ts >= dayEnd) continue;
+      st.builds++;
+      const res = DATA.results[code];
+      st.counts[res] = (st.counts[res] || 0) + 1;
+    }
+  });
+  return stats;
+}
+
+// 1 日分の区間 [表示行idx, 開始ms, 終了ms, 結果名, 種別] を作る。種別は
+// "queue" (キュー待ち: timestamp 〜 実行開始)、"run" (ビルド実行中)、
+// "idle" (実行終了〜次のビルドのキュー投入、直前の結果のままの待機)。
+// Jenkins の timestamp はスケジュール (キュー投入) 時刻で、実行開始は
+// timestamp + queuing。最初のビルドより前は状態不明なので描かない。
+function computeDetailSegments(dayStart, dayEnd) {
+  const segs = [];
+  const push = (vi, s, e, code, kind) => {
+    s = Math.max(s, dayStart);
+    e = Math.min(e, dayEnd);
+    if (e > s) segs.push([vi, s, e, DATA.results[code], kind]);
+  };
+  viewIdx.forEach((oji, vi) => {
+    const builds = DATA.builds[oji];
+    builds.forEach(([ts, code, dur = 0, queuing = 0], i) => {
+      const runStart = ts + queuing;
+      if (queuing > 0) push(vi, ts, runStart, code, "queue");
+      push(vi, runStart, runStart + dur, code, "run");
+      const nextStart = i + 1 < builds.length ? builds[i + 1][0] : DATA.now;
+      push(vi, runStart + dur, nextStart, code, "idle");
+    });
+  });
+  return segs;
+}
+
+function detailOption(dayStart, axisEnd) {
+  const fmtTime = (t) =>
+    new Date(t).toLocaleTimeString("ja-JP", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+  return {
+    animation: false,
+    tooltip: {
+      formatter: (p) => {
+        const d = currentDetail[p.dataIndex];
+        const mins = ((d[2] - d[1]) / 60000).toFixed(1);
+        const label = d[4] === "run" ? `ビルド実行中 (${d[3]})`
+          : d[4] === "queue" ? `キュー待機 (この後のビルド: ${d[3]})`
+          : `状態: ${d[3]} (直前のビルドの結果)`;
+        return `<b>${viewJobs[d[0]]}</b><br>${label}<br>` +
+          `${fmtTime(d[1])} 〜 ${fmtTime(d[2])} (${mins} 分)`;
+      },
+    },
+    grid: { left: 250, right: 30, top: 20, bottom: 40 },
+    xAxis: {
+      type: "time",
+      min: dayStart,
+      max: axisEnd,
+      axisLabel: {
+        formatter: (t) => new Date(t).toLocaleTimeString("ja-JP", { hour: "2-digit", minute: "2-digit" }),
+      },
+    },
+    yAxis: {
+      type: "category",
+      data: viewJobs,
+      inverse: true,
+      axisLabel: {
+        margin: 12,
+        formatter: (job) => {
+          const name = job.length > 34 ? job.slice(0, 33) + "…" : job;
+          const s = detailStats[job];
+          if (!s || !s.known) return `{name|${name}}\n{dim|データなし}`;
+          // 1 行目: 時間内訳 (状態別の待機 / 実行 / キュー待ち)。色はチャートと対応
+          const pct = (ms) => Math.round((ms / s.known) * 100);
+          const RICH = { SUCCESS: "ok", FAILURE: "ng", UNSTABLE: "un", ABORTED: "ab" };
+          const LABEL = { SUCCESS: "成功", FAILURE: "失敗", UNSTABLE: "不安定", ABORTED: "中止" };
+          const parts = [];
+          for (const res of ["SUCCESS", "FAILURE", "UNSTABLE", "ABORTED"]) {
+            if (s.idle[res]) parts.push(`{${RICH[res]}|${LABEL[res]}${pct(s.idle[res])}%}`);
+          }
+          if (s.run) parts.push(`{run|ビルド${pct(s.run)}%}`);
+          if (s.queue) parts.push(`{q|待機${pct(s.queue)}%}`);
+          // 2 行目: ビルド回数と結果の内訳
+          const cnt = ["SUCCESS", "FAILURE", "UNSTABLE", "ABORTED"]
+            .filter((res) => s.counts[res])
+            .map((res) => `{${RICH[res]}|${LABEL[res]}${s.counts[res]}}`)
+            .join("{sep| }");
+          const buildLine = s.builds
+            ? `{dim|ビルド${s.builds}回 (}${cnt}{dim|)}`
+            : "{dim|ビルドなし}";
+          return `{name|${name}}\n${parts.join("{sep| }")}\n${buildLine}`;
+        },
+        rich: {
+          name: { align: "right", color: "#263238", lineHeight: 16 },
+          ok: { color: "#2e7d32", fontSize: 10, lineHeight: 13 },
+          ng: { color: "#c62828", fontSize: 10, lineHeight: 13 },
+          un: { color: "#ef6c00", fontSize: 10, lineHeight: 13 },
+          ab: { color: "#757575", fontSize: 10, lineHeight: 13 },
+          run: { color: "#1b5e20", fontSize: 10, lineHeight: 13, fontWeight: "bold" },
+          q: { color: "#1565c0", fontSize: 10, lineHeight: 13 },
+          sep: { color: "#90a4ae", fontSize: 10, lineHeight: 13 },
+          dim: { color: "#90a4ae", fontSize: 10, lineHeight: 13 },
+        },
+      },
+    },
+    series: [{
+      type: "custom",
+      encode: { x: [1, 2], y: 0 },
+      data: currentDetail,
+      renderItem: (params, api) => {
+        const d = currentDetail[params.dataIndex];
+        if (!d) return null;
+        const y = api.coord([api.value(1), api.value(0)])[1];
+        const x1 = api.coord([api.value(1), 0])[0];
+        const x2 = api.coord([api.value(2), 0])[0];
+        const run = d[4] === "run";
+        // ビルド中は少し太くして目立たせる
+        const h = Math.min(api.size([0, 1])[1] * (run ? 0.8 : 0.45), run ? 22 : 14);
+        const rect = echarts.graphic.clipRectByRect(
+          { x: x1, y: y - h / 2, width: Math.max(x2 - x1, 1), height: h },
+          { x: params.coordSys.x, y: params.coordSys.y, width: params.coordSys.width, height: params.coordSys.height }
+        );
+        const fill = run ? DARK_COLORS[d[3]]
+          : d[4] === "queue" ? QUEUE_COLOR
+          : COLORS[d[3]];
+        return rect && {
+          type: "rect",
+          shape: rect,
+          style: { fill: fill || "#90a4ae" },
+        };
+      },
+    }],
+  };
+}
+
+function renderDetail() {
+  if (!detailChart) return;
+  if (!detailDate.value || detailDate.value < MIN_DATE) detailDate.value = MIN_DATE;
+  if (detailDate.value > MAX_DATE) detailDate.value = MAX_DATE;
+  document.getElementById("prev-day").disabled = detailDate.value <= MIN_DATE;
+  document.getElementById("next-day").disabled = detailDate.value >= MAX_DATE;
+
+  const dayStart = parseDate(detailDate.value);
+  const axisEnd = dayStart + DAY_MS;
+  // resize は旧データのまま先に行う (currentDetail 差し替え後だと旧系列の
+  // 再描画が新配列を範囲外参照してしまう)
+  detailEl.style.height = viewJobs.length * 56 + 100 + "px"; // ラベル 3 行分
+  detailChart.resize();
+  currentDetail = computeDetailSegments(dayStart, Math.min(axisEnd, DATA.now));
+  detailStats = computeDetailStats(dayStart, axisEnd);
+  detailChart.setOption(detailOption(dayStart, axisEnd), true);
+}
+
+function shiftDetailDay(delta) {
+  const d = new Date(parseDate(detailDate.value) + delta * DAY_MS);
+  detailDate.value = dayKey(d.getTime());
+  renderDetail();
+}
+detailDate.addEventListener("change", renderDetail);
+document.getElementById("prev-day").addEventListener("click", () => shiftDetailDay(-1));
+document.getElementById("next-day").addEventListener("click", () => shiftDetailDay(1));
+
+// ---- タブ切り替え ----
+
+function showTab(name) {
+  document.getElementById("view-overview").style.display = name === "overview" ? "" : "none";
+  document.getElementById("view-detail").style.display = name === "detail" ? "" : "none";
+  document.getElementById("tab-overview").classList.toggle("active", name === "overview");
+  document.getElementById("tab-detail").classList.toggle("active", name === "detail");
+  if (name === "detail") {
+    if (!detailChart) detailChart = echarts.init(detailEl);
+    renderDetail();
+  } else {
+    // 非表示中はサイズが取れないので、表示に戻ったタイミングで再計算
+    tl.resize(); trend.resize(); hm.resize();
+  }
+}
+document.getElementById("tab-overview").addEventListener("click", () => showTab("overview"));
+document.getElementById("tab-detail").addEventListener("click", () => showTab("detail"));
+
 fromInput.value = MIN_DATE;
 toInput.value = MAX_DATE;
 render();
-window.addEventListener("resize", () => { tl.resize(); trend.resize(); hm.resize(); });
+window.addEventListener("resize", () => { tl.resize(); trend.resize(); hm.resize(); detailChart?.resize(); });
 </script>
 </body>
 </html>
