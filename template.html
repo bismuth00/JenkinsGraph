@@ -64,7 +64,7 @@
 </div>
 <div id="trend"></div>
 
-<h2>日別ヒートマップ — 1日のうち失敗状態だった時間の割合(%)</h2>
+<h2>日別ヒートマップ — ビルドの失敗率(失敗ビルド数 ÷ ビルド数、%)</h2>
 <div id="heatmap"></div>
 
 <h2>日別ビルド回数(結果別の積み上げ)</h2>
@@ -269,16 +269,25 @@ function computeCounts(fromMs, endMs) {
 }
 
 function computeHeatmap(fromMs, endMs) {
+  // ビルド回数ベースの失敗率: その日の失敗ビルド数 ÷ ビルド数。
+  // ビルドがなかった日はセルなし (空白)。
   const dates = [];
   for (let t = fromMs; t < endMs; t += DAY_MS) dates.push(dayKey(t));
 
   const values = [];
   viewIdx.forEach((oji, vi) => {
-    const { failMs, knownMs } = viewDaily[vi];
-    knownMs.forEach((known, di) => {
-      if (!known) return; // 状態不明の日 (最初のビルドより前) は空白
-      values.push([di, vi, Math.round((failMs[di] / known) * 100), failMs[di], known]);
-    });
+    const agg = new Map(); // 日付idx -> [失敗数, 総数]
+    for (const [ts, code] of DATA.builds[oji]) {
+      if (ts < fromMs || ts >= endMs) continue;
+      const di = Math.floor((ts - fromMs) / DAY_MS);
+      const cell = agg.get(di) || [0, 0];
+      cell[1]++;
+      if (FAIL_CODES.has(code)) cell[0]++;
+      agg.set(di, cell);
+    }
+    for (const [di, [fail, total]] of agg) {
+      values.push([di, vi, Math.round((fail / total) * 100), fail, total]);
+    }
   });
   return { dates, values };
 }
@@ -499,7 +508,7 @@ function heatmapOption(values) {
     tooltip: {
       formatter: (p) =>
         `<b>${viewJobs[p.data[1]]}</b><br>${currentDates[p.data[0]]}<br>` +
-        `失敗率 ${p.data[2]}% (失敗 ${hoursLabel(p.data[3])} / ${hoursLabel(p.data[4])})`,
+        `失敗率 ${p.data[2]}% (${p.data[3]}/${p.data[4]} 件)`,
     },
     grid: { left: 250, right: 30, top: 20, bottom: 90 },
     xAxis: { type: "category", data: currentDates, axisLabel: { rotate: 45 } },
