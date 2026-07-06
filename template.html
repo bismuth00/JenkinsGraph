@@ -873,7 +873,8 @@ function showTab(name) {
 document.getElementById("tab-overview").addEventListener("click", () => showTab("overview"));
 document.getElementById("tab-detail").addEventListener("click", () => showTab("detail"));
 
-fromInput.value = MIN_DATE;
+// デフォルトの表示期間は直近 30 日 (データがそれより短い場合は render() が範囲内に補正)
+fromInput.value = dayKey(daysAgo(29));
 toInput.value = MAX_DATE;
 render();
 window.addEventListener("resize", () => { tl.resize(); trend.resize(); hm.resize(); detailChart?.resize(); });
