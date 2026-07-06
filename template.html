@@ -221,16 +221,31 @@ function computeStats(fromMs, endMs) {
 
 // ジョブの「同じ結果が続いた区間」を [開始ms, 終了ms, 結果コード] で返す。
 // 区間の終了は次に結果が変わったビルドの開始時刻、最後の区間は現在時刻まで。
+// ビルド b[4] は欠落フラグ: 次に保存されているビルドと番号が連続していない
+// (ローテーションで間のビルドが取得できていない)。その場合は区間を
+// そのビルドの実行終了で打ち切り、次のビルドまでは状態不明 (区間なし) にする。
 function jobRuns(builds) {
-  const changes = [];
-  for (const [ts, code] of builds) {
-    if (!changes.length || changes[changes.length - 1][1] !== code) changes.push([ts, code]);
-  }
-  return changes.map(([start, code], i) => [
-    start,
-    i + 1 < changes.length ? changes[i + 1][0] : DATA.now,
-    code,
-  ]);
+  const runs = [];
+  let cur = null; // [開始ms, 終了ms, 結果コード]
+  builds.forEach((b, i) => {
+    const [ts, code, dur = 0] = b;
+    if (!cur) {
+      cur = [ts, 0, code];
+    } else if (cur[2] !== code) {
+      cur[1] = ts;
+      runs.push(cur);
+      cur = [ts, 0, code];
+    }
+    if (b[4]) {
+      cur[1] = ts + dur;
+      runs.push(cur);
+      cur = null;
+    } else if (i === builds.length - 1) {
+      cur[1] = DATA.now;
+      runs.push(cur);
+    }
+  });
+  return runs;
 }
 
 function computeSpans(fromMs, endMs) {
@@ -657,9 +672,11 @@ function computeDetailSegments(dayStart, dayEnd) {
   };
   viewIdx.forEach((oji, vi) => {
     const builds = DATA.builds[oji];
-    builds.forEach(([ts, code, dur = 0, queuing = 0], i) => {
+    builds.forEach((b, i) => {
+      const [ts, code, dur = 0, queuing = 0] = b;
       if (queuing > 0) push(vi, ts - queuing, ts, code, "queue");
       push(vi, ts, ts + dur, code, "run");
+      if (b[4]) return; // 次のビルドと番号が連続していない = 間は状態不明
       let idleEnd = DATA.now;
       if (i + 1 < builds.length) {
         const next = builds[i + 1];

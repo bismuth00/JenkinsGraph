@@ -28,7 +28,7 @@ def load_builds(db_path):
     cols = {r[1] for r in conn.execute("PRAGMA table_info(builds)")}
     queuing = "queuing" if "queuing" in cols else "0"
     return conn.execute(
-        f"SELECT job_name, result, timestamp, duration, {queuing} FROM builds"
+        f"SELECT job_name, result, timestamp, duration, {queuing}, number FROM builds"
         " ORDER BY job_name, timestamp"
     ).fetchall()
 
@@ -45,28 +45,37 @@ def select_jobs(rows, window_start_ms):
 
 
 def encode_builds(rows, jobs, window_start_ms):
-    """ジョブごとの [timestamp, 結果コード, duration, queuing] 配列と、
+    """ジョブごとの [timestamp, 結果コード, duration, queuing(, 欠落フラグ)] 配列と、
     コード→結果名の対応表を作る。
 
     期間開始時点でどの状態だったか分かるよう、期間より前のビルドも
     直近の 1 件だけ含める。結果名は数値コードに置き換えてサイズを抑える。
+
+    欠落フラグ (5 番目, 1): 次に保存されているビルドと番号が連続していない印。
+    Jenkins はログローテーション後も lastFailedBuild などを残すため、
+    間のビルドが取得できていない期間がありうる。その区間はこのビルドの
+    結果が続いたとは言えないので、テンプレート側で「状態不明」として扱う。
     """
     job_index = {j: i for i, j in enumerate(jobs)}
     result_codes = {}
     by_job = defaultdict(list)
-    for job, result, ts, dur, queuing in rows:
+    for job, result, ts, dur, queuing, number in rows:
         if job not in job_index:
             continue
         code = result_codes.setdefault(result, len(result_codes))
-        by_job[job].append([ts, code, dur, queuing])
+        by_job[job].append((ts, code, dur, queuing, number))
 
     builds = []
     for job in jobs:
         items = by_job[job]
+        encoded = []
+        for i, (ts, code, dur, queuing, number) in enumerate(items):
+            gap = i + 1 < len(items) and items[i + 1][4] != number + 1
+            encoded.append([ts, code, dur, queuing, 1] if gap else [ts, code, dur, queuing])
         first_in = next(
-            (i for i, b in enumerate(items) if b[0] >= window_start_ms), len(items)
+            (i for i, b in enumerate(encoded) if b[0] >= window_start_ms), len(encoded)
         )
-        builds.append(items[max(first_in - 1, 0):])
+        builds.append(encoded[max(first_in - 1, 0):])
 
     results = [r for r, _ in sorted(result_codes.items(), key=lambda kv: kv[1])]
     return builds, results
