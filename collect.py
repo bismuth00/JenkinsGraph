@@ -19,9 +19,9 @@ CREATE TABLE IF NOT EXISTS builds (
     job_name  TEXT    NOT NULL,
     number    INTEGER NOT NULL,
     result    TEXT    NOT NULL,  -- SUCCESS / FAILURE / UNSTABLE / ABORTED / NOT_BUILT
-    timestamp INTEGER NOT NULL,  -- スケジュール時刻 = キュー投入時刻 (エポックミリ秒)
+    timestamp INTEGER NOT NULL,  -- 実行開始時刻 (エポックミリ秒)
     duration  INTEGER NOT NULL,  -- 実行の所要時間 (ミリ秒)
-    queuing   INTEGER NOT NULL DEFAULT 0,  -- キュー待ち時間 (ミリ秒)。実行開始は timestamp + queuing
+    queuing   INTEGER NOT NULL DEFAULT 0,  -- 実行開始前のキュー待ち時間 (ミリ秒)。キュー投入は timestamp - queuing
     PRIMARY KEY (job_name, number)
 );
 """

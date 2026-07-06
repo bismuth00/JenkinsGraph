@@ -643,10 +643,11 @@ function computeDetailStats(dayStart, dayEnd) {
 }
 
 // 1 日分の区間 [表示行idx, 開始ms, 終了ms, 結果名, 種別] を作る。種別は
-// "queue" (キュー待ち: timestamp 〜 実行開始)、"run" (ビルド実行中)、
-// "idle" (実行終了〜次のビルドのキュー投入、直前の結果のままの待機)。
-// Jenkins の timestamp はスケジュール (キュー投入) 時刻で、実行開始は
-// timestamp + queuing。最初のビルドより前は状態不明なので描かない。
+// "queue" (キュー待機: キュー投入 timestamp - queuing 〜 実行開始 timestamp)、
+// "run" (ビルド実行中: timestamp 〜 + duration)、
+// "idle" (実行終了〜次のビルドのキュー投入、直前の結果のままの状態)。
+// Jenkins の timestamp は実行開始時刻で、キュー待ちはその前に発生している。
+// 最初のビルドより前は状態不明なので描かない。
 function computeDetailSegments(dayStart, dayEnd) {
   const segs = [];
   const push = (vi, s, e, code, kind) => {
@@ -657,11 +658,14 @@ function computeDetailSegments(dayStart, dayEnd) {
   viewIdx.forEach((oji, vi) => {
     const builds = DATA.builds[oji];
     builds.forEach(([ts, code, dur = 0, queuing = 0], i) => {
-      const runStart = ts + queuing;
-      if (queuing > 0) push(vi, ts, runStart, code, "queue");
-      push(vi, runStart, runStart + dur, code, "run");
-      const nextStart = i + 1 < builds.length ? builds[i + 1][0] : DATA.now;
-      push(vi, runStart + dur, nextStart, code, "idle");
+      if (queuing > 0) push(vi, ts - queuing, ts, code, "queue");
+      push(vi, ts, ts + dur, code, "run");
+      let idleEnd = DATA.now;
+      if (i + 1 < builds.length) {
+        const next = builds[i + 1];
+        idleEnd = next[0] - (next[3] || 0); // 次のビルドのキュー投入まで
+      }
+      push(vi, ts + dur, idleEnd, code, "idle");
     });
   });
   return segs;
