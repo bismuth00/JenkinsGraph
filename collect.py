@@ -26,7 +26,8 @@ CREATE TABLE IF NOT EXISTS builds (
 );
 CREATE TABLE IF NOT EXISTS jobs (
     job_name  TEXT PRIMARY KEY,
-    buildable INTEGER NOT NULL DEFAULT 1  -- 0 = Jenkins 上で無効化されている
+    buildable INTEGER NOT NULL DEFAULT 1,  -- 0 = Jenkins 上で無効化されている
+    url       TEXT NOT NULL DEFAULT ''     -- ジョブページの URL (ビルドページはこれ + 番号)
 );
 """
 
@@ -36,6 +37,9 @@ def migrate(conn):
     cols = {r[1] for r in conn.execute("PRAGMA table_info(builds)")}
     if "queuing" not in cols:
         conn.execute("ALTER TABLE builds ADD COLUMN queuing INTEGER NOT NULL DEFAULT 0")
+    job_cols = {r[1] for r in conn.execute("PRAGMA table_info(jobs)")}
+    if job_cols and "url" not in job_cols:
+        conn.execute("ALTER TABLE jobs ADD COLUMN url TEXT NOT NULL DEFAULT ''")
 
 # _class にこれらを含むものはジョブではなくコンテナとして再帰的にたどる
 CONTAINER_CLASS_KEYWORDS = ("Folder", "MultiBranchProject", "OrganizationFolder")
@@ -119,9 +123,10 @@ def main():
         if not job_filter(name):
             continue
         conn.execute(
-            "INSERT INTO jobs (job_name, buildable) VALUES (?, ?)"
-            " ON CONFLICT(job_name) DO UPDATE SET buildable = excluded.buildable",
-            (name, 1 if buildable else 0),
+            "INSERT INTO jobs (job_name, buildable, url) VALUES (?, ?, ?)"
+            " ON CONFLICT(job_name) DO UPDATE SET"
+            " buildable = excluded.buildable, url = excluded.url",
+            (name, 1 if buildable else 0, url),
         )
         since = conn.execute(
             "SELECT MAX(number) FROM builds WHERE job_name = ?", (name,)

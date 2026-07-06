@@ -223,25 +223,25 @@ function computeStats(fromMs, endMs) {
   return stats;
 }
 
-// ジョブの「同じ結果が続いた区間」を [開始ms, 終了ms, 結果コード] で返す。
-// 区間の終了は次に結果が変わったビルドの開始時刻、最後の区間は現在時刻まで
+// ジョブの「同じ結果が続いた区間」を [開始ms, 終了ms, 結果コード, 先頭ビルド番号]
+// で返す。区間の終了は次に結果が変わったビルドの開始時刻、最後の区間は現在時刻まで
 // (無効化されたジョブは状態が続いているとは言えないので最後の実行終了まで)。
-// ビルド b[4] は欠落フラグ: 次に保存されているビルドと番号が連続していない
+// ビルド b[5] は欠落フラグ: 次に保存されているビルドと番号が連続していない
 // (ローテーションで間のビルドが取得できていない)。その場合は区間を
 // そのビルドの実行終了で打ち切り、次のビルドまでは状態不明 (区間なし) にする。
 function jobRuns(builds, disabled) {
   const runs = [];
-  let cur = null; // [開始ms, 終了ms, 結果コード]
+  let cur = null; // [開始ms, 終了ms, 結果コード, 先頭ビルド番号]
   builds.forEach((b, i) => {
-    const [ts, code, dur = 0] = b;
+    const [ts, code, dur = 0, , number] = b;
     if (!cur) {
-      cur = [ts, 0, code];
+      cur = [ts, 0, code, number];
     } else if (cur[2] !== code) {
       cur[1] = ts;
       runs.push(cur);
-      cur = [ts, 0, code];
+      cur = [ts, 0, code, number];
     }
-    if (b[4]) {
+    if (b[5]) {
       cur[1] = ts + dur;
       runs.push(cur);
       cur = null;
@@ -254,14 +254,15 @@ function jobRuns(builds, disabled) {
 }
 
 function computeSpans(fromMs, endMs) {
-  // 区間を [表示行idx, 開始ms, 終了ms, 結果名] の帯にして表示範囲でクリップする。
+  // 区間を [表示行idx, 開始ms, 終了ms, 結果名, 先頭ビルド番号] の帯にして
+  // 表示範囲でクリップする。
   const spans = [];
   viewIdx.forEach((oji, vi) => {
-    for (const [start, end, code] of jobRuns(DATA.builds[oji], DATA.disabled[oji])) {
+    for (const [start, end, code, number] of jobRuns(DATA.builds[oji], DATA.disabled[oji])) {
       const s = Math.max(start, fromMs);
       const e = Math.min(end, endMs);
       if (e <= s) continue;
-      spans.push([vi, s, e, DATA.results[code]]);
+      spans.push([vi, s, e, DATA.results[code], number]);
     }
   });
   return spans;
@@ -385,13 +386,25 @@ let currentSpans = [];
 let currentDates = [];
 let stats = {};
 
+// ビルドページの URL (ジョブ URL + ビルド番号) を新しいタブで開く
+function openBuildPage(oji, number) {
+  const base = DATA.job_urls[oji];
+  if (base && number != null) window.open(base + number + "/", "_blank", "noopener");
+}
+tl.on("click", (p) => {
+  const d = currentSpans[p.dataIndex];
+  if (d) openBuildPage(viewIdx[d[0]], d[4]);
+});
+
 function timelineOption(fromMs, axisMax) {
   return {
     tooltip: {
       formatter: (p) => {
         const d = currentSpans[p.dataIndex];
         const hours = ((d[2] - d[1]) / 3600000).toFixed(1);
-        return `<b>${viewJobs[d[0]]}</b><br>${d[3]}<br>${fmt(d[1])} 〜 ${fmt(d[2])}<br>(${hours} 時間)`;
+        return `<b>${viewJobs[d[0]]}</b><br>${d[3]} (ビルド #${d[4]}〜)<br>` +
+          `${fmt(d[1])} 〜 ${fmt(d[2])}<br>(${hours} 時間)<br>` +
+          `<span style="color:#90a4ae">クリックでビルドページを開く</span>`;
       },
     },
     grid: { left: 250, right: 30, top: 20, bottom: 40 },
@@ -663,7 +676,7 @@ function computeDetailStats(dayStart, dayEnd) {
   return stats;
 }
 
-// 1 日分の区間 [表示行idx, 開始ms, 終了ms, 結果名, 種別] を作る。種別は
+// 1 日分の区間 [表示行idx, 開始ms, 終了ms, 結果名, 種別, ビルド番号] を作る。種別は
 // "queue" (キュー待機: キュー投入 timestamp - queuing 〜 実行開始 timestamp)、
 // "run" (ビルド実行中: timestamp 〜 + duration)、
 // "idle" (実行終了〜次のビルドのキュー投入、直前の結果のままの状態)。
@@ -671,19 +684,19 @@ function computeDetailStats(dayStart, dayEnd) {
 // 最初のビルドより前は状態不明なので描かない。
 function computeDetailSegments(dayStart, dayEnd) {
   const segs = [];
-  const push = (vi, s, e, code, kind) => {
+  const push = (vi, s, e, code, kind, number) => {
     s = Math.max(s, dayStart);
     e = Math.min(e, dayEnd);
-    if (e > s) segs.push([vi, s, e, DATA.results[code], kind]);
+    if (e > s) segs.push([vi, s, e, DATA.results[code], kind, number]);
   };
   viewIdx.forEach((oji, vi) => {
     const builds = DATA.builds[oji];
     const disabled = DATA.disabled[oji];
     builds.forEach((b, i) => {
-      const [ts, code, dur = 0, queuing = 0] = b;
-      if (queuing > 0) push(vi, ts - queuing, ts, code, "queue");
-      push(vi, ts, ts + dur, code, "run");
-      if (b[4]) return; // 次のビルドと番号が連続していない = 間は状態不明
+      const [ts, code, dur = 0, queuing = 0, number] = b;
+      if (queuing > 0) push(vi, ts - queuing, ts, code, "queue", number);
+      push(vi, ts, ts + dur, code, "run", number);
+      if (b[5]) return; // 次のビルドと番号が連続していない = 間は状態不明
       const isLast = i + 1 >= builds.length;
       if (isLast && disabled) return; // 無効化されたジョブは最後の実行以降を描かない
       let idleEnd = DATA.now;
@@ -691,7 +704,7 @@ function computeDetailSegments(dayStart, dayEnd) {
         const next = builds[i + 1];
         idleEnd = next[0] - (next[3] || 0); // 次のビルドのキュー投入まで
       }
-      push(vi, ts + dur, idleEnd, code, "idle");
+      push(vi, ts + dur, idleEnd, code, "idle", number);
     });
   });
   return segs;
@@ -709,8 +722,9 @@ function detailOption(dayStart, axisEnd) {
         const label = d[4] === "run" ? `ビルド実行中 (${d[3]})`
           : d[4] === "queue" ? `キュー待機 (この後のビルド: ${d[3]})`
           : `状態: ${d[3]} (直前のビルドの結果)`;
-        return `<b>${viewJobs[d[0]]}</b><br>${label}<br>` +
-          `${fmtTime(d[1])} 〜 ${fmtTime(d[2])} (${mins} 分)`;
+        return `<b>${viewJobs[d[0]]}</b> ビルド #${d[5]}<br>${label}<br>` +
+          `${fmtTime(d[1])} 〜 ${fmtTime(d[2])} (${mins} 分)<br>` +
+          `<span style="color:#90a4ae">クリックでビルドページを開く</span>`;
       },
     },
     grid: { left: 250, right: 30, top: 20, bottom: 40 },
@@ -830,7 +844,13 @@ function showTab(name) {
   document.getElementById("tab-overview").classList.toggle("active", name === "overview");
   document.getElementById("tab-detail").classList.toggle("active", name === "detail");
   if (name === "detail") {
-    if (!detailChart) detailChart = echarts.init(detailEl);
+    if (!detailChart) {
+      detailChart = echarts.init(detailEl);
+      detailChart.on("click", (p) => {
+        const d = currentDetail[p.dataIndex];
+        if (d) openBuildPage(viewIdx[d[0]], d[5]);
+      });
+    }
     renderDetail();
   } else {
     // 非表示中はサイズが取れないので、表示に戻ったタイミングで再計算

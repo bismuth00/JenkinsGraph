@@ -15,6 +15,7 @@ import tomllib
 from collections import defaultdict
 from datetime import datetime, timedelta
 from pathlib import Path
+from urllib.parse import quote
 
 from jobfilter import compile_filter
 
@@ -33,13 +34,35 @@ def load_builds(db_path):
     ).fetchall()
 
 
-def load_disabled(db_path):
-    """無効化されているジョブ名の集合。jobs テーブルがない古い DB では空。"""
+def load_jobs_meta(db_path):
+    """jobs テーブルから (無効ジョブ名の集合, ジョブ名 -> URL) を返す。
+
+    テーブルやカラムがない古い DB では空を返す (URL は呼び出し側で組み立てる)。
+    """
     conn = sqlite3.connect(db_path)
     tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     if "jobs" not in tables:
-        return set()
-    return {r[0] for r in conn.execute("SELECT job_name FROM jobs WHERE buildable = 0")}
+        return set(), {}
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(jobs)")}
+    url_col = "url" if "url" in cols else "''"
+    disabled = set()
+    urls = {}
+    for name, buildable, url in conn.execute(
+        f"SELECT job_name, buildable, {url_col} FROM jobs"
+    ):
+        if not buildable:
+            disabled.add(name)
+        if url:
+            urls[name] = url
+    return disabled, urls
+
+
+def job_url(base_url, name, urls):
+    """ジョブページの URL。jobs テーブルにあればそれを、なければ fullName から組み立てる。"""
+    if name in urls:
+        return urls[name]
+    path = "/job/".join(quote(seg, safe="") for seg in name.split("/"))
+    return f"{base_url.rstrip('/')}/job/{path}/"
 
 
 def select_jobs(rows, window_start_ms):
@@ -54,13 +77,13 @@ def select_jobs(rows, window_start_ms):
 
 
 def encode_builds(rows, jobs, window_start_ms):
-    """ジョブごとの [timestamp, 結果コード, duration, queuing(, 欠落フラグ)] 配列と、
-    コード→結果名の対応表を作る。
+    """ジョブごとの [timestamp, 結果コード, duration, queuing, number(, 欠落フラグ)]
+    配列と、コード→結果名の対応表を作る。
 
     期間開始時点でどの状態だったか分かるよう、期間より前のビルドも
     直近の 1 件だけ含める。結果名は数値コードに置き換えてサイズを抑える。
 
-    欠落フラグ (5 番目, 1): 次に保存されているビルドと番号が連続していない印。
+    欠落フラグ (6 番目, 1): 次に保存されているビルドと番号が連続していない印。
     Jenkins はログローテーション後も lastFailedBuild などを残すため、
     間のビルドが取得できていない期間がありうる。その区間はこのビルドの
     結果が続いたとは言えないので、テンプレート側で「状態不明」として扱う。
@@ -80,7 +103,10 @@ def encode_builds(rows, jobs, window_start_ms):
         encoded = []
         for i, (ts, code, dur, queuing, number) in enumerate(items):
             gap = i + 1 < len(items) and items[i + 1][4] != number + 1
-            encoded.append([ts, code, dur, queuing, 1] if gap else [ts, code, dur, queuing])
+            encoded.append(
+                [ts, code, dur, queuing, number, 1] if gap
+                else [ts, code, dur, queuing, number]
+            )
         first_in = next(
             (i for i, b in enumerate(encoded) if b[0] >= window_start_ms), len(encoded)
         )
@@ -109,7 +135,7 @@ def main():
     rows = [r for r in load_builds(cfg["db"]["path"]) if job_filter(r[0])]
     jobs = select_jobs(rows, window_start_ms)
     builds, results = encode_builds(rows, jobs, window_start_ms)
-    disabled = load_disabled(cfg["db"]["path"])
+    disabled, urls = load_jobs_meta(cfg["db"]["path"])
 
     data = {
         "generated_at": now.strftime("%Y-%m-%d %H:%M"),
@@ -120,6 +146,7 @@ def main():
         "results": results,
         "fail_results": FAIL_RESULTS,
         "disabled": [1 if j in disabled else 0 for j in jobs],
+        "job_urls": [job_url(cfg["jenkins"]["url"], j, urls) for j in jobs],
     }
 
     template = Path(__file__).with_name("template.html").read_text(encoding="utf-8")
