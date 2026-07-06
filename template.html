@@ -179,7 +179,7 @@ function computeView(fromMs, endMs) {
   jobs.forEach((name, ji) => {
     if (!showDisabled && DATA.disabled[ji]) return;
     if (terms.length && !terms.some((t) => name.toLowerCase().includes(t))) return;
-    const daily = dailyFailTime(DATA.builds[ji], fromMs, days);
+    const daily = dailyFailTime(DATA.builds[ji], fromMs, days, DATA.disabled[ji]);
     const fail = daily.failMs.reduce((a, b) => a + b, 0);
     const known = daily.knownMs.reduce((a, b) => a + b, 0);
     if (failedOnly && fail === 0) return;
@@ -224,11 +224,12 @@ function computeStats(fromMs, endMs) {
 }
 
 // ジョブの「同じ結果が続いた区間」を [開始ms, 終了ms, 結果コード] で返す。
-// 区間の終了は次に結果が変わったビルドの開始時刻、最後の区間は現在時刻まで。
+// 区間の終了は次に結果が変わったビルドの開始時刻、最後の区間は現在時刻まで
+// (無効化されたジョブは状態が続いているとは言えないので最後の実行終了まで)。
 // ビルド b[4] は欠落フラグ: 次に保存されているビルドと番号が連続していない
 // (ローテーションで間のビルドが取得できていない)。その場合は区間を
 // そのビルドの実行終了で打ち切り、次のビルドまでは状態不明 (区間なし) にする。
-function jobRuns(builds) {
+function jobRuns(builds, disabled) {
   const runs = [];
   let cur = null; // [開始ms, 終了ms, 結果コード]
   builds.forEach((b, i) => {
@@ -245,7 +246,7 @@ function jobRuns(builds) {
       runs.push(cur);
       cur = null;
     } else if (i === builds.length - 1) {
-      cur[1] = DATA.now;
+      cur[1] = disabled ? ts + dur : DATA.now;
       runs.push(cur);
     }
   });
@@ -256,7 +257,7 @@ function computeSpans(fromMs, endMs) {
   // 区間を [表示行idx, 開始ms, 終了ms, 結果名] の帯にして表示範囲でクリップする。
   const spans = [];
   viewIdx.forEach((oji, vi) => {
-    for (const [start, end, code] of jobRuns(DATA.builds[oji])) {
+    for (const [start, end, code] of jobRuns(DATA.builds[oji], DATA.disabled[oji])) {
       const s = Math.max(start, fromMs);
       const e = Math.min(end, endMs);
       if (e <= s) continue;
@@ -269,11 +270,11 @@ function computeSpans(fromMs, endMs) {
 // 日ごとの [失敗していた時間, 状態が分かっている時間] (ミリ秒)。
 // 「失敗していた時間」は失敗区間とその日の重なり。最初のビルドより前や
 // 未来の時間帯は「状態不明」として分母に含めない。
-function dailyFailTime(builds, fromMs, days) {
+function dailyFailTime(builds, fromMs, days, disabled) {
   const failMs = new Array(days).fill(0);
   const knownMs = new Array(days).fill(0);
   const endMs = Math.min(fromMs + days * DAY_MS, DATA.now);
-  for (const [start, end, code] of jobRuns(builds)) {
+  for (const [start, end, code] of jobRuns(builds, disabled)) {
     let s = Math.max(start, fromMs);
     const e = Math.min(end, endMs);
     const fail = FAIL_CODES.has(code);
@@ -677,13 +678,16 @@ function computeDetailSegments(dayStart, dayEnd) {
   };
   viewIdx.forEach((oji, vi) => {
     const builds = DATA.builds[oji];
+    const disabled = DATA.disabled[oji];
     builds.forEach((b, i) => {
       const [ts, code, dur = 0, queuing = 0] = b;
       if (queuing > 0) push(vi, ts - queuing, ts, code, "queue");
       push(vi, ts, ts + dur, code, "run");
       if (b[4]) return; // 次のビルドと番号が連続していない = 間は状態不明
+      const isLast = i + 1 >= builds.length;
+      if (isLast && disabled) return; // 無効化されたジョブは最後の実行以降を描かない
       let idleEnd = DATA.now;
-      if (i + 1 < builds.length) {
+      if (!isLast) {
         const next = builds[i + 1];
         idleEnd = next[0] - (next[3] || 0); // 次のビルドのキュー投入まで
       }
