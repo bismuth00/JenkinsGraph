@@ -24,6 +24,10 @@ CREATE TABLE IF NOT EXISTS builds (
     queuing   INTEGER NOT NULL DEFAULT 0,  -- 実行開始前のキュー待ち時間 (ミリ秒)。キュー投入は timestamp - queuing
     PRIMARY KEY (job_name, number)
 );
+CREATE TABLE IF NOT EXISTS jobs (
+    job_name  TEXT PRIMARY KEY,
+    buildable INTEGER NOT NULL DEFAULT 1  -- 0 = Jenkins 上で無効化されている
+);
 """
 
 
@@ -48,13 +52,14 @@ def load_config(path):
 
 
 def iter_jobs(session, root_url):
-    """フォルダ・マルチブランチを再帰的にたどり、ビルドを持つジョブを (fullName, url) で列挙する。"""
+    """フォルダ・マルチブランチを再帰的にたどり、ビルドを持つジョブを
+    (fullName, url, buildable) で列挙する。buildable=False は無効化されたジョブ。"""
     stack = [root_url.rstrip("/") + "/"]
     while stack:
         url = stack.pop()
         res = session.get(
             url + "api/json",
-            params={"tree": "jobs[_class,fullName,url]"},
+            params={"tree": "jobs[_class,fullName,url,buildable]"},
             timeout=30,
         )
         res.raise_for_status()
@@ -63,7 +68,7 @@ def iter_jobs(session, root_url):
             if any(k in cls for k in CONTAINER_CLASS_KEYWORDS):
                 stack.append(job["url"])
             else:
-                yield job["fullName"], job["url"]
+                yield job["fullName"], job["url"], job.get("buildable", True)
 
 
 def fetch_new_builds(session, job_url, since_number):
@@ -110,9 +115,14 @@ def main():
 
     job_filter = compile_filter(cfg)
     total = 0
-    for name, url in iter_jobs(session, cfg["jenkins"]["url"]):
+    for name, url, buildable in iter_jobs(session, cfg["jenkins"]["url"]):
         if not job_filter(name):
             continue
+        conn.execute(
+            "INSERT INTO jobs (job_name, buildable) VALUES (?, ?)"
+            " ON CONFLICT(job_name) DO UPDATE SET buildable = excluded.buildable",
+            (name, 1 if buildable else 0),
+        )
         since = conn.execute(
             "SELECT MAX(number) FROM builds WHERE job_name = ?", (name,)
         ).fetchone()[0]

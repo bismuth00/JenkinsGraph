@@ -33,6 +33,15 @@ def load_builds(db_path):
     ).fetchall()
 
 
+def load_disabled(db_path):
+    """無効化されているジョブ名の集合。jobs テーブルがない古い DB では空。"""
+    conn = sqlite3.connect(db_path)
+    tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    if "jobs" not in tables:
+        return set()
+    return {r[0] for r in conn.execute("SELECT job_name FROM jobs WHERE buildable = 0")}
+
+
 def select_jobs(rows, window_start_ms):
     """表示対象のジョブ: 期間内にビルドがあるか、最新の結果が失敗のままのジョブ。"""
     last_result = {}
@@ -100,6 +109,7 @@ def main():
     rows = [r for r in load_builds(cfg["db"]["path"]) if job_filter(r[0])]
     jobs = select_jobs(rows, window_start_ms)
     builds, results = encode_builds(rows, jobs, window_start_ms)
+    disabled = load_disabled(cfg["db"]["path"])
 
     data = {
         "generated_at": now.strftime("%Y-%m-%d %H:%M"),
@@ -109,6 +119,7 @@ def main():
         "builds": builds,
         "results": results,
         "fail_results": FAIL_RESULTS,
+        "disabled": [1 if j in disabled else 0 for j in jobs],
     }
 
     template = Path(__file__).with_name("template.html").read_text(encoding="utf-8")

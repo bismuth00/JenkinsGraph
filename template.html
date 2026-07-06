@@ -36,6 +36,20 @@
   <button id="tab-detail">詳細タイムライン</button>
 </div>
 
+<div class="period">
+  表示ジョブ:
+  <input type="text" id="job-search" placeholder="検索 (スペース区切りで OR)">
+  <label><input type="checkbox" id="failed-only"> 失敗があったジョブのみ</label>
+  <label><input type="checkbox" id="show-disabled"> 無効なジョブも表示</label>
+  並び順:
+  <select id="job-sort">
+    <option value="name">名前順</option>
+    <option value="fail">失敗率ワースト順</option>
+    <option value="worse">悪化順 (前半→後半)</option>
+  </select>
+  <span class="presets" id="job-count"></span>
+</div>
+
 <div id="view-overview">
 <div class="period">
   表示期間:
@@ -44,18 +58,6 @@
   <input type="date" id="to">
   <span class="presets">直近:</span>
   <span id="presets"></span>
-</div>
-<div class="period">
-  表示ジョブ:
-  <input type="text" id="job-search" placeholder="検索 (スペース区切りで OR)">
-  <label><input type="checkbox" id="failed-only"> 失敗があったジョブのみ</label>
-  並び順:
-  <select id="job-sort">
-    <option value="name">名前順</option>
-    <option value="fail">失敗率ワースト順</option>
-    <option value="worse">悪化順 (前半→後半)</option>
-  </select>
-  <span class="presets" id="job-count"></span>
 </div>
 
 <h2>タイムライン</h2>
@@ -170,10 +172,12 @@ function computeView(fromMs, endMs) {
   const terms = document.getElementById("job-search").value
     .trim().toLowerCase().split(/\s+/).filter(Boolean);
   const failedOnly = document.getElementById("failed-only").checked;
+  const showDisabled = document.getElementById("show-disabled").checked;
   const sortMode = document.getElementById("job-sort").value;
 
   const items = [];
   jobs.forEach((name, ji) => {
+    if (!showDisabled && DATA.disabled[ji]) return;
     if (terms.length && !terms.some((t) => name.toLowerCase().includes(t))) return;
     const daily = dailyFailTime(DATA.builds[ji], fromMs, days);
     const fail = daily.failMs.reduce((a, b) => a + b, 0);
@@ -605,6 +609,7 @@ fromInput.addEventListener("change", render);
 toInput.addEventListener("change", render);
 document.getElementById("job-search").addEventListener("input", render);
 document.getElementById("failed-only").addEventListener("change", render);
+document.getElementById("show-disabled").addEventListener("change", render);
 document.getElementById("job-sort").addEventListener("change", render);
 
 const presetEl = document.getElementById("presets");
