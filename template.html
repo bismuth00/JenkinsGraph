@@ -391,9 +391,18 @@ function openBuildPage(oji, number) {
   const base = DATA.job_urls[oji];
   if (base && number != null) window.open(base + number + "/", "_blank", "noopener");
 }
+// ジョブのトップページを新しいタブで開く (軸ラベルクリック用)
+function openJobPage(name) {
+  const url = DATA.job_urls[jobs.indexOf(name)];
+  if (url) window.open(url, "_blank", "noopener");
+}
 tl.on("click", (p) => {
+  if (p.componentType === "yAxis") return openJobPage(p.value);
   const d = currentSpans[p.dataIndex];
-  if (d) openBuildPage(viewIdx[d[0]], d[4]);
+  if (d && p.componentType === "series") openBuildPage(viewIdx[d[0]], d[4]);
+});
+hm.on("click", (p) => {
+  if (p.componentType === "yAxis") openJobPage(p.value);
 });
 
 function timelineOption(fromMs, axisMax) {
@@ -413,6 +422,7 @@ function timelineOption(fromMs, axisMax) {
       type: "category",
       data: viewJobs,
       inverse: true,
+      triggerEvent: true, // ラベルクリックでジョブページを開く
       axisLabel: {
         margin: 12,
         formatter: (job) => {
@@ -546,6 +556,7 @@ function heatmapOption(values) {
       type: "category",
       data: viewJobs,
       inverse: true,
+      triggerEvent: true, // ラベルクリックでジョブページを開く
       axisLabel: { width: 230, overflow: "truncate" },
     },
     visualMap: {
@@ -740,6 +751,7 @@ function detailOption(dayStart, axisEnd) {
       type: "category",
       data: viewJobs,
       inverse: true,
+      triggerEvent: true, // ラベルクリックでジョブページを開く
       axisLabel: {
         margin: 12,
         formatter: (job) => {
@@ -847,8 +859,9 @@ function showTab(name) {
     if (!detailChart) {
       detailChart = echarts.init(detailEl);
       detailChart.on("click", (p) => {
+        if (p.componentType === "yAxis") return openJobPage(p.value);
         const d = currentDetail[p.dataIndex];
-        if (d) openBuildPage(viewIdx[d[0]], d[5]);
+        if (d && p.componentType === "series") openBuildPage(viewIdx[d[0]], d[5]);
       });
     }
     renderDetail();
