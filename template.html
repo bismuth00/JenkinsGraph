@@ -34,9 +34,10 @@
 <div class="tabs">
   <button id="tab-overview" class="active">概要</button>
   <button id="tab-detail">詳細タイムライン</button>
+  <button id="tab-node">ノード</button>
 </div>
 
-<div class="period">
+<div class="period" id="job-controls">
   表示ジョブ:
   <input type="text" id="job-search" placeholder="検索 (スペース区切りで OR)">
   <label><input type="checkbox" id="failed-only"> 失敗があったジョブのみ</label>
@@ -80,13 +81,26 @@
 <div id="heatmap"></div>
 </div>
 
-<div id="view-detail" style="display: none;">
-<div class="period">
+<div class="period" id="node-controls" style="display: none;">
+  表示ノード:
+  <input type="text" id="node-search" placeholder="検索 (スペース区切りで OR)">
+  並び順:
+  <select id="node-sort">
+    <option value="name">名前順</option>
+    <option value="rate">稼働率順</option>
+    <option value="builds">ビルド回数順</option>
+  </select>
+  <span class="presets" id="node-count"></span>
+</div>
+
+<div class="period" id="day-controls" style="display: none;">
   日付:
   <button id="prev-day">← 前日</button>
   <input type="date" id="detail-date">
   <button id="next-day">翌日 →</button>
 </div>
+
+<div id="view-detail" style="display: none;">
 <h2>詳細タイムライン</h2>
 <div class="legend">
   <span><i style="background:#66bb6a"></i>SUCCESS</span>
@@ -94,9 +108,19 @@
   <span><i style="background:#ffa726"></i>UNSTABLE</span>
   <span><i style="background:#bdbdbd"></i>ABORTED</span>
   <span style="margin-left:12px;"><i style="background:#2e7d32"></i><i style="background:#b71c1c"></i><i style="background:#ef6c00"></i><i style="background:#757575"></i>ビルド実行中(結果の濃色)</span>
-  <span><i style="background:#90caf9"></i>キュー待ち</span>
+  <span><i style="background:#fdd835"></i>キュー待ち</span>
 </div>
 <div id="detail"></div>
+</div>
+
+<div id="view-node" style="display: none;">
+<h2>ノードタイムライン</h2>
+<div class="legend">
+  <span><i style="background:#2e7d32"></i><i style="background:#b71c1c"></i><i style="background:#ef6c00"></i><i style="background:#757575"></i>ビルド実行(結果の濃色)</span>
+  <span><i style="background:#e0e0e0"></i>オフライン</span>
+  <span style="color:#78909c;">並列実行は行内で縦に積んで表示 (全ジョブのビルドが対象)</span>
+</div>
+<div id="nodechart"></div>
 </div>
 
 <script>
@@ -117,7 +141,8 @@ const DARK_COLORS = {
   ABORTED: "#757575",
   NOT_BUILT: "#9e9e9e",
 };
-const QUEUE_COLOR = "#90caf9"; // キュー待ち (結果と無関係なので独立した色)
+// キュー待ち: 明るい黄色 (結果の色と混ざらず、詰まりが目に付く)
+const QUEUE_COLOR = "#fdd835";
 const jobs = DATA.jobs;
 const OK_CODE = DATA.results.indexOf("SUCCESS");
 const FAIL_CODES = new Set(
@@ -226,7 +251,7 @@ function computeStats(fromMs, endMs) {
 // ジョブの「同じ結果が続いた区間」を [開始ms, 終了ms, 結果コード, 先頭ビルド番号]
 // で返す。区間の終了は次に結果が変わったビルドの開始時刻、最後の区間は現在時刻まで
 // (無効化されたジョブは状態が続いているとは言えないので最後の実行終了まで)。
-// ビルド b[5] は欠落フラグ: 次に保存されているビルドと番号が連続していない
+// ビルド b[6] は欠落フラグ: 次に保存されているビルドと番号が連続していない
 // (ローテーションで間のビルドが取得できていない)。その場合は区間を
 // そのビルドの実行終了で打ち切り、次のビルドまでは状態不明 (区間なし) にする。
 function jobRuns(builds, disabled) {
@@ -241,7 +266,7 @@ function jobRuns(builds, disabled) {
       runs.push(cur);
       cur = [ts, 0, code, number];
     }
-    if (b[5]) {
+    if (b[6]) {
       cur[1] = ts + dur;
       runs.push(cur);
       cur = null;
@@ -707,7 +732,7 @@ function computeDetailSegments(dayStart, dayEnd) {
       const [ts, code, dur = 0, queuing = 0, number] = b;
       if (queuing > 0) push(vi, ts - queuing, ts, code, "queue", number);
       push(vi, ts, ts + dur, code, "run", number);
-      if (b[5]) return; // 次のビルドと番号が連続していない = 間は状態不明
+      if (b[6]) return; // 次のビルドと番号が連続していない = 間は状態不明
       const isLast = i + 1 >= builds.length;
       if (isLast && disabled) return; // 無効化されたジョブは最後の実行以降を描かない
       let idleEnd = DATA.now;
@@ -785,7 +810,8 @@ function detailOption(dayStart, axisEnd) {
           un: { color: "#ef6c00", fontSize: 10, lineHeight: 13 },
           ab: { color: "#757575", fontSize: 10, lineHeight: 13 },
           run: { color: "#1b5e20", fontSize: 10, lineHeight: 13, fontWeight: "bold" },
-          q: { color: "#1565c0", fontSize: 10, lineHeight: 13 },
+          // ラベル文字は白背景なので、帯の黄色より暗いトーンで読めるようにする
+          q: { color: "#9c7a00", fontSize: 10, lineHeight: 13 },
           sep: { color: "#90a4ae", fontSize: 10, lineHeight: 13 },
           dim: { color: "#90a4ae", fontSize: 10, lineHeight: 13 },
         },
@@ -839,22 +865,239 @@ function renderDetail() {
   detailChart.setOption(detailOption(dayStart, axisEnd), true);
 }
 
+function renderDayViews() {
+  renderDetail();
+  renderNode();
+}
 function shiftDetailDay(delta) {
   const d = new Date(parseDate(detailDate.value) + delta * DAY_MS);
   detailDate.value = dayKey(d.getTime());
-  renderDetail();
+  renderDayViews();
 }
-detailDate.addEventListener("change", renderDetail);
+detailDate.addEventListener("change", renderDayViews);
 document.getElementById("prev-day").addEventListener("click", () => shiftDetailDay(-1));
 document.getElementById("next-day").addEventListener("click", () => shiftDetailDay(1));
+
+// ---- ノードタイムライン (1 日単位、行 = ノード) ----
+
+const nodeEl = document.getElementById("nodechart");
+let nodeChart = null;
+let currentNodeSegs = [];
+let nodeStats = {};
+const OFFLINE_COLOR = "#e0e0e0";
+// ノード不明のビルド (Pipeline など builtOn が取れないもの) があれば専用行を出す
+const HAS_UNKNOWN_NODE = DATA.builds.some((bs) => bs.some((b) => (b[5] ?? -1) < 0));
+const ALL_NODE_ROWS = [...DATA.nodes, ...(HAS_UNKNOWN_NODE ? ["(ノード不明)"] : [])];
+let currentNodeRows = []; // 絞り込み・並び替え後の表示行 (ノード名)
+
+// 重なる区間をレーンに割り当てる (開始順に、空いている最初のレーンへ)
+function assignLanes(segs) {
+  segs.sort((a, b) => a.s - b.s);
+  const laneEnds = [];
+  for (const seg of segs) {
+    let lane = laneEnds.findIndex((end) => end <= seg.s);
+    if (lane < 0) {
+      lane = laneEnds.length;
+      laneEnds.push(0);
+    }
+    seg.lane = lane;
+    laneEnds[lane] = seg.e;
+  }
+  return Math.max(laneEnds.length, 1);
+}
+
+function computeNodeView(dayStart, dayEnd) {
+  // ノードタブはジョブの絞り込みの影響を受けず、全ジョブのビルドを表示する。
+  // 絞り込み・並び替えはノード専用のコントロール (#node-search / #node-sort)。
+  const terms = document.getElementById("node-search").value
+    .trim().toLowerCase().split(/\s+/).filter(Boolean);
+  const sortMode = document.getElementById("node-sort").value;
+
+  const runsByRow = ALL_NODE_ROWS.map(() => []);
+  DATA.jobs.forEach((job, oji) => {
+    for (const b of DATA.builds[oji]) {
+      const [ts, code, dur = 0, , number] = b;
+      const nidx = b[5] ?? -1;
+      const s = Math.max(ts, dayStart);
+      const e = Math.min(ts + dur, dayEnd);
+      if (e <= s) continue;
+      const i = nidx >= 0 ? nidx : ALL_NODE_ROWS.length - 1;
+      runsByRow[i].push({ s, e, kind: "run", res: DATA.results[code], number, oji });
+    }
+  });
+
+  const elapsed = Math.max(dayEnd - dayStart, 1);
+  let items = ALL_NODE_ROWS.map((name, i) => {
+    const runs = runsByRow[i];
+    const executors = i < DATA.nodes.length ? DATA.node_executors[i] : null;
+    const busy = runs.reduce((a, x) => a + (x.e - x.s), 0);
+    return {
+      name,
+      orig: i < DATA.nodes.length ? i : -1, // DATA.node_offline の index (-1 = 不明行)
+      runs, executors, busy,
+      builds: runs.length,
+      fails: runs.filter((x) => FAIL_CODES.has(DATA.results.indexOf(x.res))).length,
+      rate: executors ? busy / (elapsed * executors) : -1,
+    };
+  });
+  if (terms.length) {
+    items = items.filter((it) => terms.some((t) => it.name.toLowerCase().includes(t)));
+  }
+  if (sortMode === "rate") {
+    items.sort((a, b) => b.rate - a.rate || a.name.localeCompare(b.name));
+  } else if (sortMode === "builds") {
+    items.sort((a, b) => b.builds - a.builds || a.name.localeCompare(b.name));
+  }
+
+  const segs = [];
+  const stats = {};
+  let maxLanes = 1;
+  items.forEach((it, row) => {
+    // オフライン帯を先に入れてビルド帯を上に描く
+    if (it.orig >= 0) {
+      for (const [s, e] of DATA.node_offline[it.orig] || []) {
+        const cs = Math.max(s, dayStart);
+        const ce = Math.min(e, dayEnd);
+        if (ce > cs) segs.push({ row, s: cs, e: ce, kind: "off" });
+      }
+    }
+    const lanes = assignLanes(it.runs);
+    it.runs.forEach((seg) => { seg.row = row; seg.lanes = lanes; });
+    segs.push(...it.runs);
+    maxLanes = Math.max(maxLanes, it.runs.length ? lanes : 1);
+    stats[it.name] = { busy: it.busy, builds: it.builds, fails: it.fails, executors: it.executors, elapsed };
+  });
+  return { rows: items.map((it) => it.name), segs, maxLanes, stats };
+}
+
+function nodeOption(dayStart, axisEnd) {
+  const fmtTime = (t) =>
+    new Date(t).toLocaleTimeString("ja-JP", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+  return {
+    animation: false,
+    tooltip: {
+      formatter: (p) => {
+        const d = currentNodeSegs[p.dataIndex];
+        if (!d) return "";
+        const mins = ((d.e - d.s) / 60000).toFixed(1);
+        if (d.kind === "off") {
+          return `<b>${currentNodeRows[d.row]}</b><br>オフライン (収集間隔の粒度)<br>` +
+            `${fmtTime(d.s)} 〜 ${fmtTime(d.e)} (${mins} 分)`;
+        }
+        return `<b>${DATA.jobs[d.oji]}</b> ビルド #${d.number}<br>${d.res}<br>` +
+          `${fmtTime(d.s)} 〜 ${fmtTime(d.e)} (${mins} 分)<br>` +
+          `<span style="color:#90a4ae">クリックでビルドページを開く</span>`;
+      },
+    },
+    grid: { left: 250, right: 30, top: 20, bottom: 40 },
+    xAxis: {
+      type: "time",
+      min: dayStart,
+      max: axisEnd,
+      axisLabel: {
+        formatter: (t) => new Date(t).toLocaleTimeString("ja-JP", { hour: "2-digit", minute: "2-digit" }),
+      },
+    },
+    yAxis: {
+      type: "category",
+      data: currentNodeRows,
+      inverse: true,
+      triggerEvent: true, // ラベルクリックでノードページを開く
+      axisLabel: {
+        margin: 12,
+        formatter: (name) => {
+          const label = name.length > 30 ? name.slice(0, 29) + "…" : name;
+          const s = nodeStats[name];
+          if (!s) return `{name|${label}}`;
+          const parts = [];
+          if (s.executors != null) {
+            const rate = Math.round((s.busy / (s.elapsed * s.executors)) * 100);
+            parts.push(`{run|稼働率${rate}%}`);
+          }
+          parts.push(`{dim|ビルド${s.builds}回}`);
+          if (s.fails) parts.push(`{ng|失敗${s.fails}}`);
+          return `{name|${label}}\n${parts.join("{sep| }")}`;
+        },
+        rich: {
+          name: { align: "right", color: "#263238", lineHeight: 16 },
+          run: { color: "#1b5e20", fontSize: 10, lineHeight: 13, fontWeight: "bold" },
+          ng: { color: "#c62828", fontSize: 10, lineHeight: 13 },
+          sep: { color: "#90a4ae", fontSize: 10, lineHeight: 13 },
+          dim: { color: "#90a4ae", fontSize: 10, lineHeight: 13 },
+        },
+      },
+    },
+    series: [{
+      type: "custom",
+      encode: { x: [1, 2], y: 0 },
+      data: currentNodeSegs.map((d) => [d.row, d.s, d.e]),
+      renderItem: (params, api) => {
+        const d = currentNodeSegs[params.dataIndex];
+        if (!d) return null;
+        const yCenter = api.coord([api.value(1), api.value(0)])[1];
+        const x1 = api.coord([d.s, 0])[0];
+        const x2 = api.coord([d.e, 0])[0];
+        const rowH = api.size([0, 1])[1];
+        let y, h;
+        if (d.kind === "off") {
+          h = rowH * 0.85;
+          y = yCenter - h / 2;
+        } else {
+          const laneH = Math.min(16, (rowH - 16) / d.lanes);
+          const gap = 2;
+          const total = d.lanes * laneH + (d.lanes - 1) * gap;
+          y = yCenter - total / 2 + d.lane * (laneH + gap);
+          h = laneH;
+        }
+        const rect = echarts.graphic.clipRectByRect(
+          { x: x1, y, width: Math.max(x2 - x1, 1), height: h },
+          { x: params.coordSys.x, y: params.coordSys.y, width: params.coordSys.width, height: params.coordSys.height }
+        );
+        return rect && {
+          type: "rect",
+          shape: rect,
+          style: { fill: d.kind === "off" ? OFFLINE_COLOR : DARK_COLORS[d.res] || "#90a4ae" },
+        };
+      },
+    }],
+  };
+}
+
+function renderNode() {
+  if (!nodeChart) return;
+  if (!detailDate.value || detailDate.value < MIN_DATE) detailDate.value = MIN_DATE;
+  if (detailDate.value > MAX_DATE) detailDate.value = MAX_DATE;
+  const dayStart = parseDate(detailDate.value);
+  const axisEnd = dayStart + DAY_MS;
+  const view = computeNodeView(dayStart, Math.min(axisEnd, DATA.now));
+  // resize は旧データのまま先に行う (renderDetail と同じ理由)
+  nodeEl.style.height = Math.max(view.rows.length, 1) * Math.max(44, view.maxLanes * 18 + 20) + 100 + "px";
+  nodeChart.resize();
+  currentNodeRows = view.rows;
+  currentNodeSegs = view.segs;
+  nodeStats = view.stats;
+  nodeChart.setOption(nodeOption(dayStart, axisEnd), true);
+  document.getElementById("node-count").textContent =
+    view.rows.length === ALL_NODE_ROWS.length
+      ? `全 ${ALL_NODE_ROWS.length} ノード`
+      : `${view.rows.length} / ${ALL_NODE_ROWS.length} ノード`;
+}
+document.getElementById("node-search").addEventListener("input", renderNode);
+document.getElementById("node-sort").addEventListener("change", renderNode);
 
 // ---- タブ切り替え ----
 
 function showTab(name) {
   document.getElementById("view-overview").style.display = name === "overview" ? "" : "none";
   document.getElementById("view-detail").style.display = name === "detail" ? "" : "none";
+  document.getElementById("view-node").style.display = name === "node" ? "" : "none";
+  document.getElementById("day-controls").style.display = name === "overview" ? "none" : "";
+  // ジョブの絞り込みはジョブ単位のタブ (概要/詳細)、ノードの絞り込みはノードタブにだけ表示する
+  document.getElementById("job-controls").style.display = name === "node" ? "none" : "";
+  document.getElementById("node-controls").style.display = name === "node" ? "" : "none";
   document.getElementById("tab-overview").classList.toggle("active", name === "overview");
   document.getElementById("tab-detail").classList.toggle("active", name === "detail");
+  document.getElementById("tab-node").classList.toggle("active", name === "node");
   if (name === "detail") {
     if (!detailChart) {
       detailChart = echarts.init(detailEl);
@@ -865,6 +1108,23 @@ function showTab(name) {
       });
     }
     renderDetail();
+  } else if (name === "node") {
+    if (!nodeChart) {
+      nodeChart = echarts.init(nodeEl);
+      nodeChart.on("click", (p) => {
+        if (p.componentType === "yAxis") {
+          if (p.value === "(ノード不明)") return;
+          window.open(
+            DATA.jenkins_url + "/computer/" + encodeURIComponent(p.value) + "/",
+            "_blank", "noopener"
+          );
+          return;
+        }
+        const d = currentNodeSegs[p.dataIndex];
+        if (d && d.kind === "run" && p.componentType === "series") openBuildPage(d.oji, d.number);
+      });
+    }
+    renderNode();
   } else {
     // 非表示中はサイズが取れないので、表示に戻ったタイミングで再計算
     tl.resize(); trend.resize(); hm.resize();
@@ -872,12 +1132,13 @@ function showTab(name) {
 }
 document.getElementById("tab-overview").addEventListener("click", () => showTab("overview"));
 document.getElementById("tab-detail").addEventListener("click", () => showTab("detail"));
+document.getElementById("tab-node").addEventListener("click", () => showTab("node"));
 
 // デフォルトの表示期間は直近 30 日 (データがそれより短い場合は render() が範囲内に補正)
 fromInput.value = dayKey(daysAgo(29));
 toInput.value = MAX_DATE;
 render();
-window.addEventListener("resize", () => { tl.resize(); trend.resize(); hm.resize(); detailChart?.resize(); });
+window.addEventListener("resize", () => { tl.resize(); trend.resize(); hm.resize(); detailChart?.resize(); nodeChart?.resize(); });
 </script>
 </body>
 </html>

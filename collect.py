@@ -8,6 +8,7 @@ import argparse
 import os
 import sqlite3
 import sys
+import time
 import tomllib
 
 import requests
@@ -29,6 +30,15 @@ CREATE TABLE IF NOT EXISTS jobs (
     buildable INTEGER NOT NULL DEFAULT 1,  -- 0 = Jenkins 上で無効化されている
     url       TEXT NOT NULL DEFAULT ''     -- ジョブページの URL (ビルドページはこれ + 番号)
 );
+CREATE TABLE IF NOT EXISTS nodes (
+    node_name TEXT PRIMARY KEY,            -- ビルトインノードは '' で記録
+    executors INTEGER NOT NULL DEFAULT 1
+);
+CREATE TABLE IF NOT EXISTS node_status (
+    sampled_at INTEGER NOT NULL,           -- サンプリング時刻 (エポックミリ秒)
+    node_name  TEXT NOT NULL,
+    offline    INTEGER NOT NULL
+);
 """
 
 
@@ -37,6 +47,9 @@ def migrate(conn):
     cols = {r[1] for r in conn.execute("PRAGMA table_info(builds)")}
     if "queuing" not in cols:
         conn.execute("ALTER TABLE builds ADD COLUMN queuing INTEGER NOT NULL DEFAULT 0")
+    if "node" not in cols:
+        # NULL = ノード不明 (Pipeline など builtOn を返さないビルド)、'' = ビルトインノード
+        conn.execute("ALTER TABLE builds ADD COLUMN node TEXT")
     job_cols = {r[1] for r in conn.execute("PRAGMA table_info(jobs)")}
     if job_cols and "url" not in job_cols:
         conn.execute("ALTER TABLE jobs ADD COLUMN url TEXT NOT NULL DEFAULT ''")
@@ -87,7 +100,7 @@ def fetch_new_builds(session, job_url, since_number):
     field = "allBuilds" if since_number is None else "builds"
     res = session.get(
         job_url + "api/json",
-        params={"tree": f"{field}[number,result,timestamp,duration,actions[queuingDurationMillis]]"},
+        params={"tree": f"{field}[number,result,timestamp,duration,builtOn,actions[queuingDurationMillis]]"},
         timeout=120,
     )
     res.raise_for_status()
@@ -101,7 +114,35 @@ def fetch_new_builds(session, job_url, since_number):
              if a and "queuingDurationMillis" in a),
             0,
         )
+        # builtOn: '' はビルトインノード。フィールド自体がない (Pipeline など) は
+        # None = ノード不明として記録する
+        b["node"] = b.get("builtOn")
         yield b
+
+
+def sample_nodes(session, base_url, conn):
+    """ノード一覧とオンライン/オフライン状態を記録する (実行のたびに 1 サンプル)。"""
+    res = session.get(
+        base_url.rstrip("/") + "/computer/api/json",
+        params={"tree": "computer[displayName,offline,numExecutors]"},
+        timeout=30,
+    )
+    res.raise_for_status()
+    now_ms = int(time.time() * 1000)
+    for c in res.json().get("computer", []):
+        name = c.get("displayName", "")
+        if name in ("Built-In Node", "master"):
+            name = ""  # ビルドの builtOn ('') と揃える
+        conn.execute(
+            "INSERT INTO nodes (node_name, executors) VALUES (?, ?)"
+            " ON CONFLICT(node_name) DO UPDATE SET executors = excluded.executors",
+            (name, c.get("numExecutors", 1)),
+        )
+        conn.execute(
+            "INSERT INTO node_status VALUES (?, ?, ?)",
+            (now_ms, name, 1 if c.get("offline") else 0),
+        )
+    conn.commit()
 
 
 def main():
@@ -116,6 +157,8 @@ def main():
 
     session = requests.Session()
     session.auth = (cfg["jenkins"]["user"], cfg["jenkins"]["token"])
+
+    sample_nodes(session, cfg["jenkins"]["url"], conn)
 
     job_filter = compile_filter(cfg)
     total = 0
@@ -133,9 +176,9 @@ def main():
         ).fetchone()[0]
         builds = list(fetch_new_builds(session, url, since))
         conn.executemany(
-            "INSERT OR IGNORE INTO builds VALUES (?, ?, ?, ?, ?, ?)",
-            [(name, b["number"], b["result"], b["timestamp"], b["duration"], b["queuing"])
-             for b in builds],
+            "INSERT OR IGNORE INTO builds VALUES (?, ?, ?, ?, ?, ?, ?)",
+            [(name, b["number"], b["result"], b["timestamp"], b["duration"],
+              b["queuing"], b["node"]) for b in builds],
         )
         conn.commit()
         if builds:
