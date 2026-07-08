@@ -181,9 +181,17 @@ def main():
         datetime.combine(window_start_date, datetime.min.time()).timestamp() * 1000
     )
 
+    # [jobs] は収集対象 (DB に古いジョブが残っていても揃うようレポートでも適用)。
+    # 表示対象は [report.timeline] (概要/詳細タイムライン) と
+    # [report.charts] (推移・ヒートマップ・ノード・パイプライン) で別に絞れる
     job_filter = compile_filter(cfg)
+    rep = cfg.get("report", {})
+    tl_filter = compile_filter(cfg, rep.get("timeline", {}), "report.timeline")
+    ch_filter = compile_filter(cfg, rep.get("charts", {}), "report.charts")
+
     rows = [r for r in load_builds(cfg["db"]["path"]) if job_filter(r[0])]
-    jobs = select_jobs(rows, window_start_ms)
+    jobs = [j for j in select_jobs(rows, window_start_ms)
+            if tl_filter(j) or ch_filter(j)]
 
     # ノード一覧: nodes テーブルとビルドの実行ノードの和集合 ('' はビルトインノード)
     executors, node_samples = load_nodes(cfg["db"]["path"])
@@ -206,6 +214,8 @@ def main():
         "jenkins_url": cfg["jenkins"]["url"].rstrip("/"),
         "show_trend": bool(cfg["report"].get("show_trend", True)),
         "show_heatmap": bool(cfg["report"].get("show_heatmap", True)),
+        "tl_jobs": [1 if tl_filter(j) else 0 for j in jobs],
+        "ch_jobs": [1 if ch_filter(j) else 0 for j in jobs],
         "nodes": [n if n else "(built-in)" for n in node_names],
         "node_executors": [executors.get(n, 1) for n in node_names],
         "node_offline": offline_intervals(node_samples, node_index, window_start_ms, now_ms),

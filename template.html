@@ -209,7 +209,16 @@ function halfDelta(failMs, knownMs) {
   return (sum(failMs, mid, failMs.length) / k2 - sum(failMs, 0, mid) / k1) * 100;
 }
 
-function computeView(fromMs, endMs) {
+// config の [report.timeline] / [report.charts] で決まる表示対象マスク。
+// タイムライン (概要/詳細) 用とそれ以外のチャート用を別に絞れる
+const TL_MASK = DATA.tl_jobs;
+const CH_MASK = DATA.ch_jobs;
+// チャート用 (推移グラフ・ヒートマップ) のビュー
+let chIdx = [];
+let chJobs = [];
+let chDaily = [];
+
+function computeViewFor(mask, fromMs, endMs) {
   const days = Math.round((endMs - fromMs) / DAY_MS);
   const terms = document.getElementById("job-search").value
     .trim().toLowerCase().split(/\s+/).filter(Boolean);
@@ -219,6 +228,7 @@ function computeView(fromMs, endMs) {
 
   const items = [];
   jobs.forEach((name, ji) => {
+    if (!mask[ji]) return;
     if (!showDisabled && DATA.disabled[ji]) return;
     if (terms.length && !terms.some((t) => name.toLowerCase().includes(t))) return;
     const daily = dailyFailTime(DATA.builds[ji], fromMs, days, DATA.disabled[ji]);
@@ -237,10 +247,19 @@ function computeView(fromMs, endMs) {
     items.sort((a, b) =>
       ((b.delta ?? -Infinity) - (a.delta ?? -Infinity)) || a.name.localeCompare(b.name));
   }
-  viewIdx = items.map((x) => x.ji);
-  viewJobs = items.map((x) => x.name);
-  viewDaily = items.map((x) => x.daily);
-  viewDelta = items.map((x) => x.delta);
+  return items;
+}
+
+function computeView(fromMs, endMs) {
+  const tl = computeViewFor(TL_MASK, fromMs, endMs);
+  viewIdx = tl.map((x) => x.ji);
+  viewJobs = tl.map((x) => x.name);
+  viewDaily = tl.map((x) => x.daily);
+  viewDelta = tl.map((x) => x.delta);
+  const ch = computeViewFor(CH_MASK, fromMs, endMs);
+  chIdx = ch.map((x) => x.ji);
+  chJobs = ch.map((x) => x.name);
+  chDaily = ch.map((x) => x.daily);
 }
 
 // ---- 選択中の期間 [fromMs, endMs) に対する集計 (表示対象のジョブのみ) ----
@@ -341,7 +360,7 @@ function computeHeatmap(fromMs, endMs) {
   for (let t = fromMs; t < endMs; t += DAY_MS) dates.push(dayKey(t));
 
   const values = [];
-  viewIdx.forEach((oji, vi) => {
+  chIdx.forEach((oji, vi) => {
     const agg = new Map(); // 日付idx -> [失敗数, 総数]
     for (const [ts, code] of DATA.builds[oji]) {
       if (ts < fromMs || ts >= endMs) continue;
@@ -382,8 +401,8 @@ function computeTrends(fromMs, endMs) {
   // 状態が分からない日 (最初のビルドより前) は null (線が途切れる)。
   const dates = [];
   for (let t = fromMs; t < endMs; t += DAY_MS) dates.push(dayKey(t));
-  const perJob = viewJobs.map((job, vi) => {
-    const { failMs, knownMs } = viewDaily[vi];
+  const perJob = chJobs.map((job, vi) => {
+    const { failMs, knownMs } = chDaily[vi];
     const rates = knownMs.map((known, di) =>
       known ? Math.round((failMs[di] / known) * 100) : null
     );
@@ -422,7 +441,7 @@ if (trend) {
 function setAllTrendSeries(on) {
   if (!trend) return;
   const type = on ? "legendSelect" : "legendUnSelect";
-  for (const job of viewJobs) trend.dispatchAction({ type, name: job });
+  for (const job of chJobs) trend.dispatchAction({ type, name: job });
   trendSelected = trend.getOption().legend[0].selected;
 }
 document.getElementById("trend-all-on").addEventListener("click", () => setAllTrendSeries(true));
@@ -597,14 +616,14 @@ function heatmapOption(values) {
   return {
     tooltip: {
       formatter: (p) =>
-        `<b>${viewJobs[p.value[1]]}</b><br>${currentDates[p.value[0]]}<br>` +
+        `<b>${chJobs[p.value[1]]}</b><br>${currentDates[p.value[0]]}<br>` +
         `失敗率 ${p.value[2]}% (${p.value[3]}/${p.value[4]} 件)`,
     },
     grid: { left: 250, right: 30, top: 20, bottom: 90 },
     xAxis: { type: "category", data: currentDates, axisLabel: { rotate: 45 } },
     yAxis: {
       type: "category",
-      data: viewJobs,
+      data: chJobs,
       inverse: true,
       triggerEvent: true, // ラベルクリックでジョブページを開く
       axisLabel: { width: 230, overflow: "truncate" },
@@ -652,8 +671,8 @@ function render() {
   computeView(fromMs, endMs);
   // 行数が変わるチャートの高さを表示ジョブ数に合わせる
   tlEl.style.height = viewJobs.length * ROW_H_TL + 100 + "px";
-  trendEl.style.height = Math.max(300, viewJobs.length * 24 + 80) + "px";
-  hmEl.style.height = viewJobs.length * ROW_H_HM + 120 + "px";
+  trendEl.style.height = Math.max(300, chJobs.length * 24 + 80) + "px";
+  hmEl.style.height = chJobs.length * ROW_H_HM + 120 + "px";
   tl.resize(); trend?.resize(); hm?.resize();
 
   stats = computeStats(fromMs, endMs);
@@ -671,8 +690,12 @@ function render() {
   document.getElementById("meta").textContent =
     `生成: ${DATA.generated_at} / 表示期間: ${fromInput.value} 〜 ${toInput.value} (${days}日)` +
     ` / 表示ジョブ: ${viewJobs.length} / ${jobs.length}`;
-  document.getElementById("job-count").textContent =
-    viewJobs.length === jobs.length ? `全 ${jobs.length} ジョブ` : `${viewJobs.length} / ${jobs.length} ジョブ`;
+  const masksDiffer = TL_MASK.join() !== CH_MASK.join();
+  document.getElementById("job-count").textContent = masksDiffer
+    ? `タイムライン ${viewJobs.length} / チャート ${chJobs.length} / 全 ${jobs.length} ジョブ`
+    : viewJobs.length === jobs.length
+      ? `全 ${jobs.length} ジョブ`
+      : `${viewJobs.length} / ${jobs.length} ジョブ`;
   document.querySelectorAll("#presets button").forEach((b) => {
     b.classList.toggle(
       "active",
@@ -943,6 +966,7 @@ function computeNodeView(dayStart, dayEnd) {
 
   const runsByRow = ALL_NODE_ROWS.map(() => []);
   DATA.jobs.forEach((job, oji) => {
+    if (!CH_MASK[oji]) return; // [report.charts] の表示対象のみ
     for (const b of DATA.builds[oji]) {
       const [ts, code, dur = 0, , number] = b;
       const nidx = b[5] ?? -1;
@@ -1260,6 +1284,7 @@ function renderPipeline() {
   // 呼び出されていないもの (チェーンの起点) をプロファイルにする
   const roots = [];
   DATA.jobs.forEach((job, oji) => {
+    if (!CH_MASK[oji]) return; // 起点ジョブに [report.charts] の絞り込みを適用
     for (const b of DATA.builds[oji]) {
       if (b[0] < dayStart || b[0] >= dayEnd) continue;
       if (b.length >= 9) continue; // 呼び出された側は起点のチャートに含まれる
