@@ -979,15 +979,22 @@ function computeNodeView(dayStart, dayEnd) {
     const runs = runsByRow[i];
     const executors = DATA.node_executors[i];
     const busy = runs.reduce((a, x) => a + (x.e - x.s), 0);
+    // その日のオフライン帯 (行を出すかの判定にも使う)
+    const off = (DATA.node_offline[i] || [])
+      .map(([s, e]) => [Math.max(s, dayStart), Math.min(e, dayEnd)])
+      .filter(([s, e]) => e > s);
     return {
       name,
       orig: i, // DATA.node_offline の index
-      runs, executors, busy,
+      deleted: !!DATA.node_deleted[i],
+      runs, off, executors, busy,
       builds: runs.length,
       fails: runs.filter((x) => FAIL_CODES.has(DATA.results.indexOf(x.res))).length,
       rate: executors ? busy / (elapsed * executors) : -1,
     };
   });
+  // 削除済みノードは、その日に表示するもの (ビルド/オフライン帯) がなければ行を出さない
+  items = items.filter((it) => !it.deleted || it.runs.length || it.off.length);
   if (terms.length) {
     items = items.filter((it) => terms.some((t) => it.name.toLowerCase().includes(t)));
   }
@@ -1002,18 +1009,15 @@ function computeNodeView(dayStart, dayEnd) {
   let maxLanes = 1;
   items.forEach((it, row) => {
     // オフライン帯を先に入れてビルド帯を上に描く
-    if (it.orig >= 0) {
-      for (const [s, e] of DATA.node_offline[it.orig] || []) {
-        const cs = Math.max(s, dayStart);
-        const ce = Math.min(e, dayEnd);
-        if (ce > cs) segs.push({ row, s: cs, e: ce, kind: "off" });
-      }
-    }
+    for (const [s, e] of it.off) segs.push({ row, s, e, kind: "off" });
     const lanes = assignLanes(it.runs);
     it.runs.forEach((seg) => { seg.row = row; seg.lanes = lanes; });
     segs.push(...it.runs);
     maxLanes = Math.max(maxLanes, it.runs.length ? lanes : 1);
-    stats[it.name] = { busy: it.busy, builds: it.builds, fails: it.fails, executors: it.executors, elapsed };
+    stats[it.name] = {
+      busy: it.busy, builds: it.builds, fails: it.fails,
+      executors: it.executors, elapsed, deleted: it.deleted,
+    };
   });
   return { rows: items.map((it) => it.name), segs, maxLanes, stats };
 }
@@ -1054,8 +1058,10 @@ function nodeOption(dayStart, axisEnd) {
       axisLabel: {
         margin: 12,
         formatter: (name) => {
-          const label = name.length > 30 ? name.slice(0, 29) + "…" : name;
           const s = nodeStats[name];
+          const deleted = s?.deleted;
+          const full = deleted ? name + " (削除済み)" : name;
+          const label = full.length > 30 ? full.slice(0, 29) + "…" : full;
           if (!s) return `{name|${label}}`;
           const parts = [];
           if (s.executors != null) {
@@ -1064,10 +1070,12 @@ function nodeOption(dayStart, axisEnd) {
           }
           parts.push(`{dim|ビルド${s.builds}回}`);
           if (s.fails) parts.push(`{ng|失敗${s.fails}}`);
-          return `{name|${label}}\n${parts.join("{sep| }")}`;
+          // 削除済みノードは名前ごとグレーにして区別する
+          return `{${deleted ? "delname" : "name"}|${label}}\n${parts.join("{sep| }")}`;
         },
         rich: {
           name: { align: "right", color: "#263238", lineHeight: 16 },
+          delname: { align: "right", color: "#90a4ae", lineHeight: 16 },
           run: { color: "#1b5e20", fontSize: 10, lineHeight: 13, fontWeight: "bold" },
           ng: { color: "#c62828", fontSize: 10, lineHeight: 13 },
           sep: { color: "#90a4ae", fontSize: 10, lineHeight: 13 },
@@ -1366,6 +1374,8 @@ function showTab(name) {
       nodeChart = echarts.init(nodeEl);
       nodeChart.on("click", (p) => {
         if (p.componentType === "yAxis") {
+          // 削除済みノードのページはもう存在しないので開かない
+          if (DATA.node_deleted[DATA.nodes.indexOf(p.value)]) return;
           window.open(
             DATA.jenkins_url + "/computer/" + encodeURIComponent(p.value) + "/",
             "_blank", "noopener"

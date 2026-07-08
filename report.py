@@ -77,24 +77,29 @@ def load_nodes(db_path):
     return executors, samples
 
 
-def offline_intervals(samples, node_index, window_start_ms, now_ms):
+def offline_intervals(samples, node_index, window_start_ms, now_ms, current):
     """node_status のサンプル列からノードごとのオフライン区間 [開始ms, 終了ms] を作る。
 
     オフラインのサンプルが続く間を 1 区間にまとめる。区間の終わりは次に
-    オンラインが観測された時刻 (最後までオフラインなら現在時刻)。
-    粒度は収集間隔に依存する。
+    オンラインが観測された時刻。最後までオフラインの場合、現存ノードは
+    現在時刻まで、削除済みノード (current に含まれない) は最後に観測された
+    時刻までとする。粒度は収集間隔に依存する。
     """
     intervals = [[] for _ in node_index]
     cur = {}
+    last_seen = {}
     for t, name, offline in samples:  # ノード名, 時刻順
         if name not in node_index:
             continue
+        last_seen[name] = t
         if offline and name not in cur:
             cur[name] = t
         elif not offline and name in cur:
             intervals[node_index[name]].append([cur.pop(name), t])
     for name, start in cur.items():
-        intervals[node_index[name]].append([start, now_ms])
+        end = now_ms if name in current else last_seen[name]
+        if end > start:
+            intervals[node_index[name]].append([start, end])
     for lst in intervals:
         lst[:] = [iv for iv in lst if iv[1] > window_start_ms]
     return intervals
@@ -203,6 +208,14 @@ def main():
     node_names = sorted({r[6] for r in rows if r[6] is not None} | set(executors))
     node_index = {n: i for i, n in enumerate(node_names)}
 
+    # 最新のサンプリング時点に存在するノード = 現存。それ以外は削除済みとみなす
+    # (node_status が空の古い DB では判定できないので全ノードを現存扱い)
+    if node_samples:
+        latest = max(t for t, _, _ in node_samples)
+        current_nodes = {name for t, name, _ in node_samples if t == latest}
+    else:
+        current_nodes = set(node_names)
+
     builds, results = encode_builds(rows, jobs, node_index, window_start_ms)
     disabled, urls = load_jobs_meta(cfg["db"]["path"])
 
@@ -224,7 +237,9 @@ def main():
         "pipe_jobs": [1 if pipe_filter(j) else 0 for j in jobs],
         "nodes": [n if n else "(built-in)" for n in node_names],
         "node_executors": [executors.get(n, 1) for n in node_names],
-        "node_offline": offline_intervals(node_samples, node_index, window_start_ms, now_ms),
+        "node_deleted": [0 if n in current_nodes else 1 for n in node_names],
+        "node_offline": offline_intervals(
+            node_samples, node_index, window_start_ms, now_ms, current_nodes),
     }
 
     template = Path(__file__).with_name("template.html").read_text(encoding="utf-8")
