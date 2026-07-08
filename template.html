@@ -70,15 +70,19 @@
 </div>
 <div id="timeline"></div>
 
+<div id="sec-trend">
 <h2>日別失敗率の推移 — 1日のうち失敗状態だった時間の割合</h2>
 <div class="chart-tools">
   <button id="trend-all-on">全て表示</button>
   <button id="trend-all-off">全て非表示</button>
 </div>
 <div id="trend"></div>
+</div>
 
+<div id="sec-heatmap">
 <h2>日別ヒートマップ — ビルドの失敗率</h2>
 <div id="heatmap"></div>
+</div>
 </div>
 
 <div class="period" id="node-controls" style="display: none;">
@@ -118,7 +122,7 @@
 <div class="legend">
   <span><i style="background:#2e7d32"></i><i style="background:#b71c1c"></i><i style="background:#ef6c00"></i><i style="background:#757575"></i>ビルド実行(結果の濃色)</span>
   <span><i style="background:#e0e0e0"></i>オフライン</span>
-  <span style="color:#78909c;">並列実行は行内で縦に積んで表示 (全ジョブのビルドが対象)</span>
+  <span style="color:#78909c;">並列実行は行内で縦に積んで表示 (実行ノード不明のビルドは表示されません)</span>
 </div>
 <div id="nodechart"></div>
 </div>
@@ -384,18 +388,26 @@ const tlEl = document.getElementById("timeline");
 tlEl.style.height = jobs.length * ROW_H_TL + 100 + "px";
 const tl = echarts.init(tlEl);
 
+// 推移グラフとヒートマップは config の report.show_trend / show_heatmap で
+// ON/OFF できる。OFF ならセクションごと非表示にして初期化もしない
+document.getElementById("sec-trend").style.display = DATA.show_trend ? "" : "none";
+document.getElementById("sec-heatmap").style.display = DATA.show_heatmap ? "" : "none";
+
 const trendEl = document.getElementById("trend");
 // 左の縦並び凡例が全ジョブ収まる高さを確保する
 trendEl.style.height = Math.max(300, jobs.length * 24 + 80) + "px";
-const trend = echarts.init(trendEl);
+const trend = DATA.show_trend ? echarts.init(trendEl) : null;
 let trendSelected = {}; // 凡例の ON/OFF 状態 (期間切り替え後も維持する)
-// クリックは legendselectchanged、legendSelect/legendUnSelect アクションは
-// 別イベントになるためすべて監視する
-for (const ev of ["legendselectchanged", "legendselected", "legendunselected"]) {
-  trend.on(ev, (e) => { trendSelected = e.selected; });
+if (trend) {
+  // クリックは legendselectchanged、legendSelect/legendUnSelect アクションは
+  // 別イベントになるためすべて監視する
+  for (const ev of ["legendselectchanged", "legendselected", "legendunselected"]) {
+    trend.on(ev, (e) => { trendSelected = e.selected; });
+  }
 }
 
 function setAllTrendSeries(on) {
+  if (!trend) return;
   const type = on ? "legendSelect" : "legendUnSelect";
   for (const job of viewJobs) trend.dispatchAction({ type, name: job });
   trendSelected = trend.getOption().legend[0].selected;
@@ -405,7 +417,7 @@ document.getElementById("trend-all-off").addEventListener("click", () => setAllT
 
 const hmEl = document.getElementById("heatmap");
 hmEl.style.height = jobs.length * ROW_H_HM + 120 + "px";
-const hm = echarts.init(hmEl);
+const hm = DATA.show_heatmap ? echarts.init(hmEl) : null;
 
 let currentSpans = [];
 let currentDates = [];
@@ -426,7 +438,7 @@ tl.on("click", (p) => {
   const d = currentSpans[p.dataIndex];
   if (d && p.componentType === "series") openBuildPage(viewIdx[d[0]], d[4]);
 });
-hm.on("click", (p) => {
+hm?.on("click", (p) => {
   if (p.componentType === "yAxis") openJobPage(p.value);
 });
 
@@ -629,16 +641,18 @@ function render() {
   tlEl.style.height = viewJobs.length * ROW_H_TL + 100 + "px";
   trendEl.style.height = Math.max(300, viewJobs.length * 24 + 80) + "px";
   hmEl.style.height = viewJobs.length * ROW_H_HM + 120 + "px";
-  tl.resize(); trend.resize(); hm.resize();
+  tl.resize(); trend?.resize(); hm?.resize();
 
   stats = computeStats(fromMs, endMs);
   currentSpans = computeSpans(fromMs, Math.min(endMs, DATA.now));
-  const heat = computeHeatmap(fromMs, endMs);
-  currentDates = heat.dates;
 
   tl.setOption(timelineOption(fromMs, axisMax), true);
-  trend.setOption(trendOption(computeTrends(fromMs, endMs), trendSelected), true);
-  hm.setOption(heatmapOption(heat.values), true);
+  trend?.setOption(trendOption(computeTrends(fromMs, endMs), trendSelected), true);
+  if (hm) {
+    const heat = computeHeatmap(fromMs, endMs);
+    currentDates = heat.dates;
+    hm.setOption(heatmapOption(heat.values), true);
+  }
 
   const days = Math.round((endMs - fromMs) / DAY_MS);
   document.getElementById("meta").textContent =
@@ -885,9 +899,9 @@ let nodeChart = null;
 let currentNodeSegs = [];
 let nodeStats = {};
 const OFFLINE_COLOR = "#e0e0e0";
-// ノード不明のビルド (Pipeline など builtOn が取れないもの) があれば専用行を出す
-const HAS_UNKNOWN_NODE = DATA.builds.some((bs) => bs.some((b) => (b[5] ?? -1) < 0));
-const ALL_NODE_ROWS = [...DATA.nodes, ...(HAS_UNKNOWN_NODE ? ["(ノード不明)"] : [])];
+// 実行ノードが取れないビルド (Pipeline など builtOn がないもの) は
+// このタブでは表示しない
+const ALL_NODE_ROWS = [...DATA.nodes];
 let currentNodeRows = []; // 絞り込み・並び替え後の表示行 (ノード名)
 
 // 重なる区間をレーンに割り当てる (開始順に、空いている最初のレーンへ)
@@ -918,22 +932,22 @@ function computeNodeView(dayStart, dayEnd) {
     for (const b of DATA.builds[oji]) {
       const [ts, code, dur = 0, , number] = b;
       const nidx = b[5] ?? -1;
+      if (nidx < 0) continue; // 実行ノード不明のビルドは表示しない
       const s = Math.max(ts, dayStart);
       const e = Math.min(ts + dur, dayEnd);
       if (e <= s) continue;
-      const i = nidx >= 0 ? nidx : ALL_NODE_ROWS.length - 1;
-      runsByRow[i].push({ s, e, kind: "run", res: DATA.results[code], number, oji });
+      runsByRow[nidx].push({ s, e, kind: "run", res: DATA.results[code], number, oji });
     }
   });
 
   const elapsed = Math.max(dayEnd - dayStart, 1);
   let items = ALL_NODE_ROWS.map((name, i) => {
     const runs = runsByRow[i];
-    const executors = i < DATA.nodes.length ? DATA.node_executors[i] : null;
+    const executors = DATA.node_executors[i];
     const busy = runs.reduce((a, x) => a + (x.e - x.s), 0);
     return {
       name,
-      orig: i < DATA.nodes.length ? i : -1, // DATA.node_offline の index (-1 = 不明行)
+      orig: i, // DATA.node_offline の index
       runs, executors, busy,
       builds: runs.length,
       fails: runs.filter((x) => FAIL_CODES.has(DATA.results.indexOf(x.res))).length,
@@ -1113,7 +1127,6 @@ function showTab(name) {
       nodeChart = echarts.init(nodeEl);
       nodeChart.on("click", (p) => {
         if (p.componentType === "yAxis") {
-          if (p.value === "(ノード不明)") return;
           window.open(
             DATA.jenkins_url + "/computer/" + encodeURIComponent(p.value) + "/",
             "_blank", "noopener"
@@ -1127,7 +1140,7 @@ function showTab(name) {
     renderNode();
   } else {
     // 非表示中はサイズが取れないので、表示に戻ったタイミングで再計算
-    tl.resize(); trend.resize(); hm.resize();
+    tl.resize(); trend?.resize(); hm?.resize();
   }
 }
 document.getElementById("tab-overview").addEventListener("click", () => showTab("overview"));
@@ -1138,7 +1151,7 @@ document.getElementById("tab-node").addEventListener("click", () => showTab("nod
 fromInput.value = dayKey(daysAgo(29));
 toInput.value = MAX_DATE;
 render();
-window.addEventListener("resize", () => { tl.resize(); trend.resize(); hm.resize(); detailChart?.resize(); nodeChart?.resize(); });
+window.addEventListener("resize", () => { tl.resize(); trend?.resize(); hm?.resize(); detailChart?.resize(); nodeChart?.resize(); });
 </script>
 </body>
 </html>

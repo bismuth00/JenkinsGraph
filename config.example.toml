@@ -28,3 +28,6 @@ path = "jenkins.db"
 # 期間 (7/14/30/... 日) に切り替えて表示できる
 days = 60
 output = "report.html"
+# 概要タブのチャートの表示 (タイムラインは常に表示)
+show_trend = true    # 日別失敗率の推移 (折れ線)
+show_heatmap = true  # 日別ヒートマップ

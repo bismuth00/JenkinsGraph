@@ -197,6 +197,8 @@ def main():
         "disabled": [1 if j in disabled else 0 for j in jobs],
         "job_urls": [job_url(cfg["jenkins"]["url"], j, urls) for j in jobs],
         "jenkins_url": cfg["jenkins"]["url"].rstrip("/"),
+        "show_trend": bool(cfg["report"].get("show_trend", True)),
+        "show_heatmap": bool(cfg["report"].get("show_heatmap", True)),
         "nodes": [n if n else "(built-in)" for n in node_names],
         "node_executors": [executors.get(n, 1) for n in node_names],
         "node_offline": offline_intervals(node_samples, node_index, window_start_ms, now_ms),
