@@ -29,8 +29,11 @@ def load_builds(db_path):
     cols = {r[1] for r in conn.execute("PRAGMA table_info(builds)")}
     queuing = "queuing" if "queuing" in cols else "0"
     node = "node" if "node" in cols else "NULL"
+    up_job = "upstream_job" if "upstream_job" in cols else "NULL"
+    up_num = "upstream_build" if "upstream_build" in cols else "NULL"
     return conn.execute(
-        f"SELECT job_name, result, timestamp, duration, {queuing}, number, {node}"
+        f"SELECT job_name, result, timestamp, duration, {queuing}, number, {node},"
+        f" {up_job}, {up_num}"
         " FROM builds ORDER BY job_name, timestamp"
     ).fetchall()
 
@@ -118,38 +121,42 @@ def select_jobs(rows, window_start_ms):
 
 def encode_builds(rows, jobs, node_index, window_start_ms):
     """ジョブごとの
-    [timestamp, 結果コード, duration, queuing, number, ノードidx(, 欠落フラグ)]
+    [timestamp, 結果コード, duration, queuing, number, ノードidx, 欠落フラグ
+     (, 上流ジョブidx, 上流ビルド番号)]
     配列と、コード→結果名の対応表を作る。ノードidx は -1 = ノード不明
     (Pipeline など builtOn が取れないビルド)。
 
     期間開始時点でどの状態だったか分かるよう、期間より前のビルドも
     直近の 1 件だけ含める。結果名は数値コードに置き換えてサイズを抑える。
 
-    欠落フラグ (7 番目, 1): 次に保存されているビルドと番号が連続していない印。
+    欠落フラグ (7 番目, 0/1): 次に保存されているビルドと番号が連続していない印。
     Jenkins はログローテーション後も lastFailedBuild などを残すため、
     間のビルドが取得できていない期間がありうる。その区間はこのビルドの
     結果が続いたとは言えないので、テンプレート側で「状態不明」として扱う。
+
+    上流 (8-9 番目, 任意): このビルドを起動したビルド (UpstreamCause)。
+    上流ジョブがレポート対象に含まれる場合のみ付与する。
     """
     job_index = {j: i for i, j in enumerate(jobs)}
     result_codes = {}
     by_job = defaultdict(list)
-    for job, result, ts, dur, queuing, number, node in rows:
+    for job, result, ts, dur, queuing, number, node, up_job, up_num in rows:
         if job not in job_index:
             continue
         code = result_codes.setdefault(result, len(result_codes))
         nidx = node_index.get(node, -1) if node is not None else -1
-        by_job[job].append((ts, code, dur, queuing, number, nidx))
+        by_job[job].append((ts, code, dur, queuing, number, nidx, up_job, up_num))
 
     builds = []
     for job in jobs:
         items = by_job[job]
         encoded = []
-        for i, (ts, code, dur, queuing, number, nidx) in enumerate(items):
+        for i, (ts, code, dur, queuing, number, nidx, up_job, up_num) in enumerate(items):
             gap = i + 1 < len(items) and items[i + 1][4] != number + 1
-            encoded.append(
-                [ts, code, dur, queuing, number, nidx, 1] if gap
-                else [ts, code, dur, queuing, number, nidx]
-            )
+            b = [ts, code, dur, queuing, number, nidx, 1 if gap else 0]
+            if up_job in job_index and up_num:
+                b += [job_index[up_job], up_num]
+            encoded.append(b)
         first_in = next(
             (i for i, b in enumerate(encoded) if b[0] >= window_start_ms), len(encoded)
         )

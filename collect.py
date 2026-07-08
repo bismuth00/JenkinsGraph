@@ -50,6 +50,10 @@ def migrate(conn):
     if "node" not in cols:
         # NULL = ノード不明 (Pipeline など builtOn を返さないビルド)、'' = ビルトインノード
         conn.execute("ALTER TABLE builds ADD COLUMN node TEXT")
+    if "upstream_job" not in cols:
+        # このビルドを起動した上流ビルド (UpstreamCause)。NULL = 手動/スケジュール起動など
+        conn.execute("ALTER TABLE builds ADD COLUMN upstream_job TEXT")
+        conn.execute("ALTER TABLE builds ADD COLUMN upstream_build INTEGER")
     job_cols = {r[1] for r in conn.execute("PRAGMA table_info(jobs)")}
     if job_cols and "url" not in job_cols:
         conn.execute("ALTER TABLE jobs ADD COLUMN url TEXT NOT NULL DEFAULT ''")
@@ -100,7 +104,8 @@ def fetch_new_builds(session, job_url, since_number):
     field = "allBuilds" if since_number is None else "builds"
     res = session.get(
         job_url + "api/json",
-        params={"tree": f"{field}[number,result,timestamp,duration,builtOn,actions[queuingDurationMillis]]"},
+        params={"tree": f"{field}[number,result,timestamp,duration,builtOn,"
+                        "actions[queuingDurationMillis,causes[upstreamProject,upstreamBuild]]]"},
         timeout=120,
     )
     res.raise_for_status()
@@ -117,6 +122,14 @@ def fetch_new_builds(session, job_url, since_number):
         # builtOn: '' はビルトインノード。フィールド自体がない (Pipeline など) は
         # None = ノード不明として記録する
         b["node"] = b.get("builtOn")
+        # UpstreamCause: このビルドを起動した上流ビルド (パイプラインの build ステップ等)
+        up = next(
+            (c for a in b.get("actions") or [] if a
+             for c in a.get("causes") or [] if c and "upstreamProject" in c),
+            None,
+        )
+        b["up_job"] = up["upstreamProject"] if up else None
+        b["up_num"] = up["upstreamBuild"] if up else None
         yield b
 
 
@@ -176,9 +189,9 @@ def main():
         ).fetchone()[0]
         builds = list(fetch_new_builds(session, url, since))
         conn.executemany(
-            "INSERT OR IGNORE INTO builds VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "INSERT OR IGNORE INTO builds VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             [(name, b["number"], b["result"], b["timestamp"], b["duration"],
-              b["queuing"], b["node"]) for b in builds],
+              b["queuing"], b["node"], b["up_job"], b["up_num"]) for b in builds],
         )
         conn.commit()
         if builds:

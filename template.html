@@ -23,6 +23,8 @@
   .chart-tools { margin: 0 0 4px; }
   .chart-tools button { border: 1px solid #b0bec5; background: #fff; color: #455a64; padding: 2px 10px; margin-right: 6px; border-radius: 4px; cursor: pointer; font-size: 12px; }
   .legend { font-size: 13px; margin: 4px 0 8px; }
+  .profile-head { font-size: 14px; font-weight: bold; color: #263238; margin: 20px 0 0; padding-left: 8px; border-left: 4px solid #90a4ae; }
+  .profile-head .sub { font-weight: normal; font-size: 12px; color: #78909c; margin-left: 8px; }
   .legend span { display: inline-block; margin-right: 16px; }
   .legend i { display: inline-block; width: 12px; height: 12px; border-radius: 2px; margin-right: 4px; vertical-align: -1px; }
 </style>
@@ -35,6 +37,7 @@
   <button id="tab-overview" class="active">概要</button>
   <button id="tab-detail">詳細タイムライン</button>
   <button id="tab-node">ノード</button>
+  <button id="tab-pipeline">パイプライン</button>
 </div>
 
 <div class="period" id="job-controls">
@@ -125,6 +128,16 @@
   <span style="color:#78909c;">並列実行は行内で縦に積んで表示 (実行ノード不明のビルドは表示されません)</span>
 </div>
 <div id="nodechart"></div>
+</div>
+
+<div id="view-pipeline" style="display: none;">
+<h2>パイプライン実行プロファイル</h2>
+<div class="legend">
+  <span><i style="background:#2e7d32"></i><i style="background:#b71c1c"></i><i style="background:#ef6c00"></i><i style="background:#757575"></i>ビルド実行(結果の濃色)</span>
+  <span><i style="background:#fdd835"></i>キュー待ち</span>
+  <span style="color:#78909c;">他のジョブを呼び出したビルドごとに、呼び出し先の実行タイミングを表示</span>
+</div>
+<div id="pipelines"></div>
 </div>
 
 <script>
@@ -882,6 +895,7 @@ function renderDetail() {
 function renderDayViews() {
   renderDetail();
   renderNode();
+  renderPipeline();
 }
 function shiftDetailDay(delta) {
   const d = new Date(parseDate(detailDate.value) + delta * DAY_MS);
@@ -1099,19 +1113,186 @@ function renderNode() {
 document.getElementById("node-search").addEventListener("input", renderNode);
 document.getElementById("node-sort").addEventListener("change", renderNode);
 
+// ---- パイプライン実行プロファイル (1 日単位) ----
+// UpstreamCause (どのビルドから起動されたか) を使って「親ビルド → 呼び出された
+// ビルド」の関係を組み立て、親ビルドごとに profile 型チャートで表示する。
+
+const pipelinesEl = document.getElementById("pipelines");
+let pipelineCharts = [];
+
+// 親ビルド "ジョブidx:ビルド番号" -> 呼び出されたビルドの一覧
+const CHILDREN = new Map();
+DATA.jobs.forEach((job, oji) => {
+  for (const b of DATA.builds[oji]) {
+    if (b.length >= 9) {
+      const key = b[7] + ":" + b[8];
+      if (!CHILDREN.has(key)) CHILDREN.set(key, []);
+      CHILDREN.get(key).push({ oji, b });
+    }
+  }
+});
+
+// 子・孫… を再帰的に集める (循環参照はガード)
+function collectDescendants(oji, b, acc, guard) {
+  const key = oji + ":" + b[4];
+  if (guard.has(key)) return;
+  guard.add(key);
+  for (const child of CHILDREN.get(key) || []) {
+    acc.push(child);
+    collectDescendants(child.oji, child.b, acc, guard);
+  }
+}
+
+function renderProfile(root) {
+  const items = [root];
+  collectDescendants(root.oji, root.b, items, new Set());
+  items.sort((a, b2) => a.b[0] - b2.b[0]);
+
+  // 行 = ジョブ (親を先頭に、以降は最初に呼び出された順)。同じジョブの
+  // 複数ビルドは同じ行に並ぶ
+  const rowIndex = new Map([[root.oji, 0]]);
+  const rows = [DATA.jobs[root.oji]];
+  for (const it of items) {
+    if (!rowIndex.has(it.oji)) {
+      rowIndex.set(it.oji, rows.length);
+      rows.push(DATA.jobs[it.oji]);
+    }
+  }
+
+  const segs = [];
+  for (const it of items) {
+    const [ts, code, dur = 0, queuing = 0, number] = it.b;
+    const row = rowIndex.get(it.oji);
+    const res = DATA.results[code];
+    if (queuing > 0) segs.push({ row, s: ts - queuing, e: ts, kind: "queue", res, number, oji: it.oji });
+    segs.push({ row, s: ts, e: ts + dur, kind: "run", res, number, oji: it.oji });
+  }
+
+  const fmtTime = (t) =>
+    new Date(t).toLocaleTimeString("ja-JP", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+  const [rts, rcode, rdur = 0, , rnum] = root.b;
+  const head = document.createElement("div");
+  head.className = "profile-head";
+  head.innerHTML = `${DATA.jobs[root.oji]} #${rnum}` +
+    `<span class="sub">${DATA.results[rcode]} / ${fmtTime(rts)} 〜 ${fmtTime(rts + rdur)}` +
+    ` / 呼び出し ${items.length - 1} ビルド</span>`;
+  const el = document.createElement("div");
+  el.style.height = rows.length * 30 + 80 + "px";
+  pipelinesEl.append(head, el);
+
+  const minS = Math.min(...segs.map((x) => x.s));
+  const maxE = Math.max(...segs.map((x) => x.e));
+  const pad = Math.max((maxE - minS) * 0.03, 60000);
+  const chart = echarts.init(el);
+  chart.setOption({
+    animation: false,
+    tooltip: {
+      formatter: (p) => {
+        const d = segs[p.dataIndex];
+        if (!d) return "";
+        const mins = ((d.e - d.s) / 60000).toFixed(1);
+        return `<b>${DATA.jobs[d.oji]}</b> ビルド #${d.number}<br>` +
+          `${d.kind === "queue" ? "キュー待機" : `ビルド実行 (${d.res})`}<br>` +
+          `${fmtTime(d.s)} 〜 ${fmtTime(d.e)} (${mins} 分)<br>` +
+          `<span style="color:#90a4ae">クリックでビルドページを開く</span>`;
+      },
+    },
+    grid: { left: 250, right: 30, top: 10, bottom: 35 },
+    xAxis: {
+      type: "time",
+      min: minS - pad,
+      max: maxE + pad,
+      axisLabel: {
+        formatter: (t) => new Date(t).toLocaleTimeString("ja-JP", { hour: "2-digit", minute: "2-digit" }),
+      },
+    },
+    yAxis: {
+      type: "category",
+      data: rows,
+      inverse: true,
+      triggerEvent: true, // ラベルクリックでジョブページを開く
+      axisLabel: { width: 230, overflow: "truncate" },
+    },
+    series: [{
+      type: "custom",
+      encode: { x: [1, 2], y: 0 },
+      data: segs.map((d) => [d.row, d.s, d.e]),
+      renderItem: (params, api) => {
+        const d = segs[params.dataIndex];
+        if (!d) return null;
+        const yCenter = api.coord([api.value(1), api.value(0)])[1];
+        const x1 = api.coord([d.s, 0])[0];
+        const x2 = api.coord([d.e, 0])[0];
+        const rowH = api.size([0, 1])[1];
+        const h = Math.min(rowH * (d.kind === "run" ? 0.6 : 0.35), d.kind === "run" ? 18 : 10);
+        const rect = echarts.graphic.clipRectByRect(
+          { x: x1, y: yCenter - h / 2, width: Math.max(x2 - x1, 1), height: h },
+          { x: params.coordSys.x, y: params.coordSys.y, width: params.coordSys.width, height: params.coordSys.height }
+        );
+        return rect && {
+          type: "rect",
+          shape: rect,
+          style: { fill: d.kind === "queue" ? QUEUE_COLOR : DARK_COLORS[d.res] || "#90a4ae" },
+        };
+      },
+    }],
+  });
+  chart.on("click", (p) => {
+    if (p.componentType === "yAxis") return openJobPage(p.value);
+    const d = segs[p.dataIndex];
+    if (d && p.componentType === "series") openBuildPage(d.oji, d.number);
+  });
+  pipelineCharts.push(chart);
+}
+
+function renderPipeline() {
+  if (document.getElementById("view-pipeline").style.display === "none") return;
+  if (!detailDate.value || detailDate.value < MIN_DATE) detailDate.value = MIN_DATE;
+  if (detailDate.value > MAX_DATE) detailDate.value = MAX_DATE;
+  const dayStart = parseDate(detailDate.value);
+  const dayEnd = dayStart + DAY_MS;
+
+  pipelineCharts.forEach((c) => c.dispose());
+  pipelineCharts = [];
+  pipelinesEl.innerHTML = "";
+
+  // その日に開始した「他のビルドを呼び出したビルド」のうち、自分自身は
+  // 呼び出されていないもの (チェーンの起点) をプロファイルにする
+  const roots = [];
+  DATA.jobs.forEach((job, oji) => {
+    for (const b of DATA.builds[oji]) {
+      if (b[0] < dayStart || b[0] >= dayEnd) continue;
+      if (b.length >= 9) continue; // 呼び出された側は起点のチャートに含まれる
+      if (!CHILDREN.has(oji + ":" + b[4])) continue;
+      roots.push({ oji, b });
+    }
+  });
+  roots.sort((a, b2) => a.b[0] - b2.b[0]);
+
+  if (!roots.length) {
+    pipelinesEl.innerHTML =
+      '<p class="meta">この日に他のジョブを呼び出したビルドはありません。</p>';
+    return;
+  }
+  for (const root of roots) renderProfile(root);
+}
+
 // ---- タブ切り替え ----
 
 function showTab(name) {
   document.getElementById("view-overview").style.display = name === "overview" ? "" : "none";
   document.getElementById("view-detail").style.display = name === "detail" ? "" : "none";
   document.getElementById("view-node").style.display = name === "node" ? "" : "none";
+  document.getElementById("view-pipeline").style.display = name === "pipeline" ? "" : "none";
   document.getElementById("day-controls").style.display = name === "overview" ? "none" : "";
   // ジョブの絞り込みはジョブ単位のタブ (概要/詳細)、ノードの絞り込みはノードタブにだけ表示する
-  document.getElementById("job-controls").style.display = name === "node" ? "none" : "";
+  document.getElementById("job-controls").style.display =
+    name === "node" || name === "pipeline" ? "none" : "";
   document.getElementById("node-controls").style.display = name === "node" ? "" : "none";
   document.getElementById("tab-overview").classList.toggle("active", name === "overview");
   document.getElementById("tab-detail").classList.toggle("active", name === "detail");
   document.getElementById("tab-node").classList.toggle("active", name === "node");
+  document.getElementById("tab-pipeline").classList.toggle("active", name === "pipeline");
   if (name === "detail") {
     if (!detailChart) {
       detailChart = echarts.init(detailEl);
@@ -1138,6 +1319,8 @@ function showTab(name) {
       });
     }
     renderNode();
+  } else if (name === "pipeline") {
+    renderPipeline();
   } else {
     // 非表示中はサイズが取れないので、表示に戻ったタイミングで再計算
     tl.resize(); trend?.resize(); hm?.resize();
@@ -1146,12 +1329,16 @@ function showTab(name) {
 document.getElementById("tab-overview").addEventListener("click", () => showTab("overview"));
 document.getElementById("tab-detail").addEventListener("click", () => showTab("detail"));
 document.getElementById("tab-node").addEventListener("click", () => showTab("node"));
+document.getElementById("tab-pipeline").addEventListener("click", () => showTab("pipeline"));
 
 // デフォルトの表示期間は直近 30 日 (データがそれより短い場合は render() が範囲内に補正)
 fromInput.value = dayKey(daysAgo(29));
 toInput.value = MAX_DATE;
 render();
-window.addEventListener("resize", () => { tl.resize(); trend?.resize(); hm?.resize(); detailChart?.resize(); nodeChart?.resize(); });
+window.addEventListener("resize", () => {
+  tl.resize(); trend?.resize(); hm?.resize(); detailChart?.resize(); nodeChart?.resize();
+  pipelineCharts.forEach((c) => c.resize());
+});
 </script>
 </body>
 </html>
