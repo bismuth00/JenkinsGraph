@@ -9,6 +9,8 @@ config の report.days を上限に切り替えられる。
 """
 
 import argparse
+import base64
+import gzip
 import json
 import sqlite3
 import tomllib
@@ -125,22 +127,26 @@ def select_jobs(rows, window_start_ms):
 
 
 def encode_builds(rows, jobs, node_index, window_start_ms):
-    """ジョブごとの
-    [timestamp, 結果コード, duration, queuing, number, ノードidx, 欠落フラグ
-     (, 上流ジョブidx, 上流ビルド番号)]
-    配列と、コード→結果名の対応表を作る。ノードidx は -1 = ノード不明
-    (Pipeline など builtOn が取れないビルド)。
+    """ジョブごとのビルド配列 (サイズ削減のための差分エンコード形式) と、
+    コード→結果名の対応表を作る。
+
+    1 ビルド =
+    [ts差分(秒), 結果コード, duration(秒), queuing(秒), number差分, ノードidx,
+     欠落フラグ (, 上流ジョブidx, 上流ビルド番号)]
+
+    - ts / number は同じジョブの直前のビルドとの差分 (先頭は絶対値)。
+      テンプレート側で読み込み時に絶対値 (ミリ秒) へ展開する
+    - 上流がない場合、末尾の 欠落フラグ=0 とノードidx=-1 は省略される
+    - ノードidx -1 = ノード不明 (Pipeline など builtOn が取れないビルド)
+    - 欠落フラグ = 次に保存されているビルドと番号が連続していない印。
+      Jenkins はログローテーション後も lastFailedBuild などを残すため、
+      間のビルドが取得できていない期間がありうる。その区間は
+      テンプレート側で「状態不明」として扱う
+    - 上流 = このビルドを起動したビルド (UpstreamCause)。上流ジョブが
+      レポート対象に含まれる場合のみ付与する
 
     期間開始時点でどの状態だったか分かるよう、期間より前のビルドも
-    直近の 1 件だけ含める。結果名は数値コードに置き換えてサイズを抑える。
-
-    欠落フラグ (7 番目, 0/1): 次に保存されているビルドと番号が連続していない印。
-    Jenkins はログローテーション後も lastFailedBuild などを残すため、
-    間のビルドが取得できていない期間がありうる。その区間はこのビルドの
-    結果が続いたとは言えないので、テンプレート側で「状態不明」として扱う。
-
-    上流 (8-9 番目, 任意): このビルドを起動したビルド (UpstreamCause)。
-    上流ジョブがレポート対象に含まれる場合のみ付与する。
+    直近の 1 件だけ含める。
     """
     job_index = {j: i for i, j in enumerate(jobs)}
     result_codes = {}
@@ -155,17 +161,26 @@ def encode_builds(rows, jobs, node_index, window_start_ms):
     builds = []
     for job in jobs:
         items = by_job[job]
+        first_in = next(
+            (i for i, b in enumerate(items) if b[0] >= window_start_ms), len(items)
+        )
+        items = items[max(first_in - 1, 0):]
         encoded = []
+        prev_ts = prev_num = 0
         for i, (ts, code, dur, queuing, number, nidx, up_job, up_num) in enumerate(items):
             gap = i + 1 < len(items) and items[i + 1][4] != number + 1
-            b = [ts, code, dur, queuing, number, nidx, 1 if gap else 0]
+            ts_s = round(ts / 1000)
+            row = [ts_s - prev_ts, code, round(dur / 1000), round(queuing / 1000),
+                   number - prev_num, nidx, 1 if gap else 0]
+            prev_ts, prev_num = ts_s, number
             if up_job in job_index and up_num:
-                b += [job_index[up_job], up_num]
-            encoded.append(b)
-        first_in = next(
-            (i for i, b in enumerate(encoded) if b[0] >= window_start_ms), len(encoded)
-        )
-        builds.append(encoded[max(first_in - 1, 0):])
+                row += [job_index[up_job], up_num]
+            elif not gap:
+                row.pop()
+                if row[5] == -1:
+                    row.pop()
+            encoded.append(row)
+        builds.append(encoded)
 
     results = [r for r, _ in sorted(result_codes.items(), key=lambda kv: kv[1])]
     return builds, results
@@ -242,11 +257,17 @@ def main():
             node_samples, node_index, window_start_ms, now_ms, current_nodes),
     }
 
+    # サイズ削減のため、JSON を gzip + base64 で埋め込む
+    # (テンプレート側で DecompressionStream を使って展開する)
+    payload = json.dumps(data, ensure_ascii=False, separators=(",", ":"))
+    packed = base64.b64encode(gzip.compress(payload.encode("utf-8"), 9)).decode("ascii")
+
     template = Path(__file__).with_name("template.html").read_text(encoding="utf-8")
-    html = template.replace("__DATA__", json.dumps(data, ensure_ascii=False))
+    html = template.replace("__DATA__", json.dumps(packed))
     out = Path(cfg["report"].get("output", "report.html"))
     out.write_text(html, encoding="utf-8")
-    print(f"{out} を生成しました (ジョブ {len(jobs)} 件, 最大期間 {days} 日)")
+    print(f"{out} を生成しました (ジョブ {len(jobs)} 件, 最大期間 {days} 日,"
+          f" {out.stat().st_size / 1024:.0f} KB)")
 
 
 if __name__ == "__main__":

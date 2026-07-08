@@ -145,6 +145,10 @@ Windows ならタスクスケジューラで同等のコマンドを登録する
   UNSTABLE を成功扱いにしたい場合はここを変更する。
 - レポートに含める最大期間は `config.toml` の `report.days` (既定 60 日)。
   埋め込むデータ量もこれに比例するので、長くしすぎると HTML が重くなる。
+- レポートのデータは差分エンコード + gzip 圧縮で埋め込まれる
+  (無圧縮比で約 1/4)。展開に DecompressionStream を使うため、表示には
+  モダンブラウザ (Chrome 80+ / Edge / Firefox 113+ / Safari 16.4+) が必要。
+  時刻・所要時間は秒精度に丸められる。
 - 概要タブの「日別失敗率の推移」と「日別ヒートマップ」は `config.toml` の
   `report.show_trend` / `report.show_heatmap` (既定 true) で非表示にできる
   (タイムラインは常に表示)。

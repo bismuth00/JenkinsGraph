@@ -147,7 +147,36 @@
 </div>
 
 <script>
-const DATA = __DATA__;
+// レポートデータは gzip + base64 で埋め込まれている (サイズ削減のため)
+const DATA_GZ = __DATA__;
+
+async function unpackData() {
+  const bytes = Uint8Array.from(atob(DATA_GZ), (c) => c.charCodeAt(0));
+  const stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream("gzip"));
+  const data = JSON.parse(await new Response(stream).text());
+  // ビルド配列は差分エンコードされているので絶対値 (ミリ秒) に展開する。
+  // 展開後: [ts(ms), 結果コード, duration(ms), queuing(ms), number, ノードidx,
+  //          欠落フラグ (, 上流ジョブidx, 上流ビルド番号)]
+  data.builds = data.builds.map((list) => {
+    let ts = 0, num = 0;
+    return list.map((r) => {
+      ts += r[0];
+      num += r[4];
+      const b = [ts * 1000, r[1], r[2] * 1000, r[3] * 1000, num, r[5] ?? -1, r[6] ?? 0];
+      if (r.length >= 9) b.push(r[7], r[8]);
+      return b;
+    });
+  });
+  return data;
+}
+
+(async () => {
+if (typeof DecompressionStream === "undefined") {
+  document.getElementById("meta").textContent =
+    "このレポートの表示には DecompressionStream 対応ブラウザ (Chrome 80+ / Edge / Firefox 113+ / Safari 16.4+) が必要です。";
+  return;
+}
+const DATA = await unpackData();
 
 const COLORS = {
   SUCCESS: "#66bb6a",
@@ -1407,6 +1436,20 @@ window.addEventListener("resize", () => {
   tl.resize(); trend?.resize(); hm?.resize(); detailChart?.resize(); nodeChart?.resize();
   pipelineCharts.forEach((c) => c.resize());
 });
+
+// 動作確認用: コンソールから内部状態を参照するためのハンドル
+window.JG = {
+  get DATA() { return DATA; },
+  get viewIdx() { return viewIdx; },
+  get viewJobs() { return viewJobs; },
+  get currentSpans() { return currentSpans; },
+  get currentDetail() { return currentDetail; },
+  get currentNodeSegs() { return currentNodeSegs; },
+  get currentNodeRows() { return currentNodeRows; },
+  get nodeStats() { return nodeStats; },
+  get pipelineCharts() { return pipelineCharts; },
+};
+})();
 </script>
 </body>
 </html>
