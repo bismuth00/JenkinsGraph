@@ -215,11 +215,12 @@ function halfDelta(failMs, knownMs) {
   return (sum(failMs, mid, failMs.length) / k2 - sum(failMs, 0, mid) / k1) * 100;
 }
 
-// config の [report.timeline] / [report.charts] で決まる表示対象マスク。
-// TL_MASK: 概要タブの全チャートと詳細タイムライン。
-// CH_MASK: ノードタブとパイプラインタブ
+// config で決まる表示対象マスク。
+// TL_MASK: [report.timeline] — 概要タブの全チャートと詳細タイムライン。
+// NODE_MASK: [report.node] — ノードタブ。PIPE_MASK: [report.pipeline] — パイプラインタブ
 const TL_MASK = DATA.tl_jobs;
-const CH_MASK = DATA.ch_jobs;
+const NODE_MASK = DATA.node_jobs;
+const PIPE_MASK = DATA.pipe_jobs;
 
 function computeViewFor(mask, fromMs, endMs) {
   const days = Math.round((endMs - fromMs) / DAY_MS);
@@ -961,7 +962,7 @@ function computeNodeView(dayStart, dayEnd) {
 
   const runsByRow = ALL_NODE_ROWS.map(() => []);
   DATA.jobs.forEach((job, oji) => {
-    if (!CH_MASK[oji]) return; // [report.charts] の表示対象のみ
+    if (!NODE_MASK[oji]) return; // [report.node] の表示対象のみ
     for (const b of DATA.builds[oji]) {
       const [ts, code, dur = 0, , number] = b;
       const nidx = b[5] ?? -1;
@@ -1197,9 +1198,22 @@ function renderProfile(root, items) {
   el.style.height = rows.length * 30 + 80 + "px";
   pipelinesEl.append(head, el);
 
+  // X 軸は起点ビルドの実行開始からの経過時間 (分)。起点前のキュー待ちはマイナス
+  const t0 = rts;
+  const rel = (t) => (t - t0) / 60000;
+  const fmtElapsed = (v) => {
+    const sign = v < 0 ? "-" : "";
+    const total = Math.round(Math.abs(v) * 60); // 秒
+    const h = Math.floor(total / 3600);
+    const m = Math.floor((total % 3600) / 60);
+    const s = total % 60;
+    if (h) return `${sign}${h}時間${m ? m + "分" : ""}`;
+    if (m) return `${sign}${m}分${s ? s + "秒" : ""}`;
+    return `${sign}${s}秒`;
+  };
   const minS = Math.min(...segs.map((x) => x.s));
   const maxE = Math.max(...segs.map((x) => x.e));
-  const pad = Math.max((maxE - minS) * 0.03, 60000);
+  const pad = Math.max((maxE - minS) * 0.03, 60000) / 60000;
   const chart = echarts.init(el);
   chart.setOption({
     animation: false,
@@ -1211,17 +1225,16 @@ function renderProfile(root, items) {
         return `<b>${DATA.jobs[d.oji]}</b> ビルド #${d.number}<br>` +
           `${d.kind === "queue" ? "キュー待機" : `ビルド実行 (${d.res})`}<br>` +
           `${fmtTime(d.s)} 〜 ${fmtTime(d.e)} (${mins} 分)<br>` +
+          `開始から ${fmtElapsed(rel(d.s))} 〜 ${fmtElapsed(rel(d.e))}<br>` +
           `<span style="color:#90a4ae">クリックでビルドページを開く</span>`;
       },
     },
     grid: { left: 250, right: 30, top: 10, bottom: 35 },
     xAxis: {
-      type: "time",
-      min: minS - pad,
-      max: maxE + pad,
-      axisLabel: {
-        formatter: (t) => new Date(t).toLocaleTimeString("ja-JP", { hour: "2-digit", minute: "2-digit" }),
-      },
+      type: "value",
+      min: rel(minS) - pad,
+      max: rel(maxE) + pad,
+      axisLabel: { formatter: fmtElapsed },
     },
     yAxis: {
       type: "category",
@@ -1233,13 +1246,13 @@ function renderProfile(root, items) {
     series: [{
       type: "custom",
       encode: { x: [1, 2], y: 0 },
-      data: segs.map((d) => [d.row, d.s, d.e]),
+      data: segs.map((d) => [d.row, rel(d.s), rel(d.e)]),
       renderItem: (params, api) => {
         const d = segs[params.dataIndex];
         if (!d) return null;
         const yCenter = api.coord([api.value(1), api.value(0)])[1];
-        const x1 = api.coord([d.s, 0])[0];
-        const x2 = api.coord([d.e, 0])[0];
+        const x1 = api.coord([api.value(1), 0])[0];
+        const x2 = api.coord([api.value(2), 0])[0];
         const rowH = api.size([0, 1])[1];
         const h = Math.min(rowH * (d.kind === "run" ? 0.6 : 0.35), d.kind === "run" ? 18 : 10);
         const rect = echarts.graphic.clipRectByRect(
@@ -1277,7 +1290,7 @@ function renderPipeline() {
   // 呼び出されていないもの (チェーンの起点) をプロファイルにする
   const roots = [];
   DATA.jobs.forEach((job, oji) => {
-    if (!CH_MASK[oji]) return; // 起点ジョブに [report.charts] の絞り込みを適用
+    if (!PIPE_MASK[oji]) return; // 起点ジョブに [report.pipeline] の絞り込みを適用
     for (const b of DATA.builds[oji]) {
       if (b[0] < dayStart || b[0] >= dayEnd) continue;
       if (b.length >= 9) continue; // 呼び出された側は起点のチャートに含まれる

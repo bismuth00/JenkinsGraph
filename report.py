@@ -182,16 +182,21 @@ def main():
     )
 
     # [jobs] は収集対象 (DB に古いジョブが残っていても揃うようレポートでも適用)。
-    # 表示対象は [report.timeline] (概要/詳細タイムライン) と
-    # [report.charts] (推移・ヒートマップ・ノード・パイプライン) で別に絞れる
+    # 表示対象はビューごとに別に絞れる:
+    #   [report.timeline] — 概要タブの全チャートと詳細タイムライン
+    #   [report.node]     — ノードタブのビルド
+    #   [report.pipeline] — パイプラインタブの起点ビルド
+    # [report.charts] は旧設定で、node / pipeline が未指定のときのフォールバック
     job_filter = compile_filter(cfg)
     rep = cfg.get("report", {})
+    charts = rep.get("charts", {})
     tl_filter = compile_filter(cfg, rep.get("timeline", {}), "report.timeline")
-    ch_filter = compile_filter(cfg, rep.get("charts", {}), "report.charts")
+    node_filter = compile_filter(cfg, rep.get("node", charts), "report.node")
+    pipe_filter = compile_filter(cfg, rep.get("pipeline", charts), "report.pipeline")
 
     rows = [r for r in load_builds(cfg["db"]["path"]) if job_filter(r[0])]
     jobs = [j for j in select_jobs(rows, window_start_ms)
-            if tl_filter(j) or ch_filter(j)]
+            if tl_filter(j) or node_filter(j) or pipe_filter(j)]
 
     # ノード一覧: nodes テーブルとビルドの実行ノードの和集合 ('' はビルトインノード)
     executors, node_samples = load_nodes(cfg["db"]["path"])
@@ -215,7 +220,8 @@ def main():
         "show_trend": bool(cfg["report"].get("show_trend", True)),
         "show_heatmap": bool(cfg["report"].get("show_heatmap", True)),
         "tl_jobs": [1 if tl_filter(j) else 0 for j in jobs],
-        "ch_jobs": [1 if ch_filter(j) else 0 for j in jobs],
+        "node_jobs": [1 if node_filter(j) else 0 for j in jobs],
+        "pipe_jobs": [1 if pipe_filter(j) else 0 for j in jobs],
         "nodes": [n if n else "(built-in)" for n in node_names],
         "node_executors": [executors.get(n, 1) for n in node_names],
         "node_offline": offline_intervals(node_samples, node_index, window_start_ms, now_ms),

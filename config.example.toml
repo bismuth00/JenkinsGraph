@@ -40,7 +40,12 @@ show_heatmap = true  # 日別ヒートマップ
 include = []
 exclude = []
 
-[report.charts]
-# ノードタブのビルドとパイプラインタブの起点ビルドの表示対象
+[report.node]
+# ノードタブに表示するビルドの対象
+include = []
+exclude = []
+
+[report.pipeline]
+# パイプラインタブの起点ビルドの対象
 include = []
 exclude = []

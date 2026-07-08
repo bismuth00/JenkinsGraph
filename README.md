@@ -134,8 +134,10 @@ Windows ならタスクスケジューラで同等のコマンドを登録する
     (Jenkins 側の履歴が消えると遡って取得できない) ので絞りすぎに注意
   - `[report.timeline]` — 概要タブ (タイムライン・失敗率の推移・ヒートマップ)
     と詳細タイムラインの表示対象
-  - `[report.charts]` — ノードタブのビルドとパイプラインタブの起点ビルドの
-    表示対象
+  - `[report.node]` — ノードタブに表示するビルドの対象
+  - `[report.pipeline]` — パイプラインタブの起点ビルドの対象
+    (旧 `[report.charts]` は node / pipeline が未指定のときの
+    フォールバックとして引き続き使える)
 - 「失敗」の定義は `report.py` の `FAIL_RESULTS` (既定: FAILURE と UNSTABLE)。
   UNSTABLE を成功扱いにしたい場合はここを変更する。
 - レポートに含める最大期間は `config.toml` の `report.days` (既定 60 日)。
