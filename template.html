@@ -100,6 +100,12 @@
   <span class="presets" id="node-count"></span>
 </div>
 
+<div class="period" id="pipeline-controls" style="display: none;">
+  絞り込み:
+  <input type="text" id="pipeline-search" placeholder="検索 (ジョブ名 / #ビルド番号、スペース区切りで OR)">
+  <span class="presets" id="pipeline-count"></span>
+</div>
+
 <div class="period" id="day-controls" style="display: none;">
   日付:
   <button id="prev-day">← 前日</button>
@@ -210,13 +216,10 @@ function halfDelta(failMs, knownMs) {
 }
 
 // config の [report.timeline] / [report.charts] で決まる表示対象マスク。
-// タイムライン (概要/詳細) 用とそれ以外のチャート用を別に絞れる
+// TL_MASK: 概要タブの全チャートと詳細タイムライン。
+// CH_MASK: ノードタブとパイプラインタブ
 const TL_MASK = DATA.tl_jobs;
 const CH_MASK = DATA.ch_jobs;
-// チャート用 (推移グラフ・ヒートマップ) のビュー
-let chIdx = [];
-let chJobs = [];
-let chDaily = [];
 
 function computeViewFor(mask, fromMs, endMs) {
   const days = Math.round((endMs - fromMs) / DAY_MS);
@@ -256,10 +259,6 @@ function computeView(fromMs, endMs) {
   viewJobs = tl.map((x) => x.name);
   viewDaily = tl.map((x) => x.daily);
   viewDelta = tl.map((x) => x.delta);
-  const ch = computeViewFor(CH_MASK, fromMs, endMs);
-  chIdx = ch.map((x) => x.ji);
-  chJobs = ch.map((x) => x.name);
-  chDaily = ch.map((x) => x.daily);
 }
 
 // ---- 選択中の期間 [fromMs, endMs) に対する集計 (表示対象のジョブのみ) ----
@@ -360,7 +359,7 @@ function computeHeatmap(fromMs, endMs) {
   for (let t = fromMs; t < endMs; t += DAY_MS) dates.push(dayKey(t));
 
   const values = [];
-  chIdx.forEach((oji, vi) => {
+  viewIdx.forEach((oji, vi) => {
     const agg = new Map(); // 日付idx -> [失敗数, 総数]
     for (const [ts, code] of DATA.builds[oji]) {
       if (ts < fromMs || ts >= endMs) continue;
@@ -401,8 +400,8 @@ function computeTrends(fromMs, endMs) {
   // 状態が分からない日 (最初のビルドより前) は null (線が途切れる)。
   const dates = [];
   for (let t = fromMs; t < endMs; t += DAY_MS) dates.push(dayKey(t));
-  const perJob = chJobs.map((job, vi) => {
-    const { failMs, knownMs } = chDaily[vi];
+  const perJob = viewJobs.map((job, vi) => {
+    const { failMs, knownMs } = viewDaily[vi];
     const rates = knownMs.map((known, di) =>
       known ? Math.round((failMs[di] / known) * 100) : null
     );
@@ -441,7 +440,7 @@ if (trend) {
 function setAllTrendSeries(on) {
   if (!trend) return;
   const type = on ? "legendSelect" : "legendUnSelect";
-  for (const job of chJobs) trend.dispatchAction({ type, name: job });
+  for (const job of viewJobs) trend.dispatchAction({ type, name: job });
   trendSelected = trend.getOption().legend[0].selected;
 }
 document.getElementById("trend-all-on").addEventListener("click", () => setAllTrendSeries(true));
@@ -616,14 +615,14 @@ function heatmapOption(values) {
   return {
     tooltip: {
       formatter: (p) =>
-        `<b>${chJobs[p.value[1]]}</b><br>${currentDates[p.value[0]]}<br>` +
+        `<b>${viewJobs[p.value[1]]}</b><br>${currentDates[p.value[0]]}<br>` +
         `失敗率 ${p.value[2]}% (${p.value[3]}/${p.value[4]} 件)`,
     },
     grid: { left: 250, right: 30, top: 20, bottom: 90 },
     xAxis: { type: "category", data: currentDates, axisLabel: { rotate: 45 } },
     yAxis: {
       type: "category",
-      data: chJobs,
+      data: viewJobs,
       inverse: true,
       triggerEvent: true, // ラベルクリックでジョブページを開く
       axisLabel: { width: 230, overflow: "truncate" },
@@ -671,8 +670,8 @@ function render() {
   computeView(fromMs, endMs);
   // 行数が変わるチャートの高さを表示ジョブ数に合わせる
   tlEl.style.height = viewJobs.length * ROW_H_TL + 100 + "px";
-  trendEl.style.height = Math.max(300, chJobs.length * 24 + 80) + "px";
-  hmEl.style.height = chJobs.length * ROW_H_HM + 120 + "px";
+  trendEl.style.height = Math.max(300, viewJobs.length * 24 + 80) + "px";
+  hmEl.style.height = viewJobs.length * ROW_H_HM + 120 + "px";
   tl.resize(); trend?.resize(); hm?.resize();
 
   stats = computeStats(fromMs, endMs);
@@ -690,12 +689,8 @@ function render() {
   document.getElementById("meta").textContent =
     `生成: ${DATA.generated_at} / 表示期間: ${fromInput.value} 〜 ${toInput.value} (${days}日)` +
     ` / 表示ジョブ: ${viewJobs.length} / ${jobs.length}`;
-  const masksDiffer = TL_MASK.join() !== CH_MASK.join();
-  document.getElementById("job-count").textContent = masksDiffer
-    ? `タイムライン ${viewJobs.length} / チャート ${chJobs.length} / 全 ${jobs.length} ジョブ`
-    : viewJobs.length === jobs.length
-      ? `全 ${jobs.length} ジョブ`
-      : `${viewJobs.length} / ${jobs.length} ジョブ`;
+  document.getElementById("job-count").textContent =
+    viewJobs.length === jobs.length ? `全 ${jobs.length} ジョブ` : `${viewJobs.length} / ${jobs.length} ジョブ`;
   document.querySelectorAll("#presets button").forEach((b) => {
     b.classList.toggle(
       "active",
@@ -1167,9 +1162,7 @@ function collectDescendants(oji, b, acc, guard) {
   }
 }
 
-function renderProfile(root) {
-  const items = [root];
-  collectDescendants(root.oji, root.b, items, new Set());
+function renderProfile(root, items) {
   items.sort((a, b2) => a.b[0] - b2.b[0]);
 
   // 行 = ジョブ (親を先頭に、以降は最初に呼び出された順)。同じジョブの
@@ -1295,12 +1288,38 @@ function renderPipeline() {
   roots.sort((a, b2) => a.b[0] - b2.b[0]);
 
   if (!roots.length) {
+    document.getElementById("pipeline-count").textContent = "0 プロファイル";
     pipelinesEl.innerHTML =
       '<p class="meta">この日に他のジョブを呼び出したビルドはありません。</p>';
     return;
   }
-  for (const root of roots) renderProfile(root);
+
+  // 検索: ジョブ名の部分一致、または "#66" 形式のビルド番号一致 (スペース区切りで OR)。
+  // 呼び出し先のジョブ/ビルドが一致した場合も、それを含むプロファイルを表示する
+  const profiles = roots.map((root) => {
+    const items = [root];
+    collectDescendants(root.oji, root.b, items, new Set());
+    return { root, items };
+  });
+  const terms = document.getElementById("pipeline-search").value
+    .trim().toLowerCase().split(/\s+/).filter(Boolean);
+  const matches = (p) => !terms.length || terms.some((t) =>
+    p.items.some((it) => t.startsWith("#")
+      ? String(it.b[4]) === t.slice(1)
+      : DATA.jobs[it.oji].toLowerCase().includes(t)));
+  const shown = profiles.filter(matches);
+
+  document.getElementById("pipeline-count").textContent =
+    shown.length === profiles.length
+      ? `全 ${profiles.length} プロファイル`
+      : `${shown.length} / ${profiles.length} プロファイル`;
+  if (!shown.length) {
+    pipelinesEl.innerHTML = '<p class="meta">絞り込みに一致するプロファイルはありません。</p>';
+    return;
+  }
+  for (const p of shown) renderProfile(p.root, p.items);
 }
+document.getElementById("pipeline-search").addEventListener("input", renderPipeline);
 
 // ---- タブ切り替え ----
 
@@ -1314,6 +1333,7 @@ function showTab(name) {
   document.getElementById("job-controls").style.display =
     name === "node" || name === "pipeline" ? "none" : "";
   document.getElementById("node-controls").style.display = name === "node" ? "" : "none";
+  document.getElementById("pipeline-controls").style.display = name === "pipeline" ? "" : "none";
   document.getElementById("tab-overview").classList.toggle("active", name === "overview");
   document.getElementById("tab-detail").classList.toggle("active", name === "detail");
   document.getElementById("tab-node").classList.toggle("active", name === "node");
