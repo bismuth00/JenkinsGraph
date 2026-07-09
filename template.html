@@ -70,6 +70,7 @@
   <span><i style="background:#e53935"></i>FAILURE</span>
   <span><i style="background:#ffa726"></i>UNSTABLE</span>
   <span><i style="background:#bdbdbd"></i>ABORTED</span>
+  <span class="meta" id="tl-scroll-note" style="margin-left: 12px;"></span>
 </div>
 <div id="timeline"></div>
 
@@ -85,6 +86,7 @@
 
 <div id="sec-heatmap">
 <h2>日別ヒートマップ — ビルドの失敗率</h2>
+<div class="meta" id="hm-scroll-note"></div>
 <div id="heatmap"></div>
 </div>
 </div>
@@ -129,6 +131,7 @@
   <span><i style="background:#bdbdbd"></i>ABORTED</span>
   <span style="margin-left:12px;"><i style="background:#2e7d32"></i><i style="background:#b71c1c"></i><i style="background:#ef6c00"></i><i style="background:#757575"></i>ビルド実行中(結果の濃色)</span>
   <span><i style="background:#fdd835"></i>キュー待ち</span>
+  <span class="meta" id="detail-scroll-note" style="margin-left: 12px;"></span>
 </div>
 <div id="detail"></div>
 </div>
@@ -139,6 +142,7 @@
   <span><i style="background:#2e7d32"></i><i style="background:#b71c1c"></i><i style="background:#ef6c00"></i><i style="background:#757575"></i>ビルド実行(結果の濃色)</span>
   <span><i style="background:#e0e0e0"></i>オフライン</span>
   <span style="color:#78909c;">並列実行は行内で縦に積んで表示 (実行ノード不明のビルドは表示されません)</span>
+  <span class="meta" id="node-scroll-note" style="margin-left: 12px;"></span>
 </div>
 <div id="nodechart"></div>
 </div>
@@ -214,6 +218,32 @@ function labelAreaWidth(names, extra) {
   return Math.max(250, Math.ceil(w) + extra);
 }
 let gridLeft = 250; // render() で表示ジョブに合わせて更新 (概要/詳細の各チャート共通)
+
+// 行チャートの一度に表示する最大行数 (config の report.scroll_rows)。
+// これを超えると高さを固定し、マウスホイールでの縦スクロールに切り替える
+// (canvas の高さ上限対策)。スクロールバーは表示せず、
+// 注記 + inside 型 dataZoom (ホイール移動) のみ使う
+const SCROLL_ROWS = DATA.scroll_rows ?? 200;
+
+function rowScroll(rowCount, noteId, filterMode) {
+  const note = document.getElementById(noteId);
+  if (rowCount <= SCROLL_ROWS) {
+    note.textContent = "";
+    return [];
+  }
+  note.textContent =
+    `全 ${rowCount} 行中 ${SCROLL_ROWS} 行を表示中 (チャート上のマウスホイールでスクロール)`;
+  return [{
+    type: "inside",
+    yAxisIndex: 0,
+    startValue: 0,
+    endValue: SCROLL_ROWS - 1,
+    zoomOnMouseWheel: false,
+    moveOnMouseWheel: true,
+    moveOnMouseMove: false,
+    filterMode: filterMode || "none",
+  }];
+}
 
 const OK_CODE = DATA.results.indexOf("SUCCESS");
 const FAIL_CODES = new Set(
@@ -559,6 +589,7 @@ function timelineOption(fromMs, axisMax) {
           `<span style="color:#90a4ae">クリックでビルドページを開く</span>`;
       },
     },
+    dataZoom: rowScroll(viewJobs.length, "tl-scroll-note"),
     grid: { left: gridLeft, right: 30, top: 20, bottom: 40 },
     xAxis: { type: "time", min: fromMs, max: axisMax },
     yAxis: {
@@ -697,6 +728,8 @@ function heatmapOption(values) {
         `<b>${viewJobs[p.value[1]]}</b><br>${currentDates[p.value[0]]}<br>` +
         `失敗率 ${p.value[2]}% (${p.value[3]}/${p.value[4]} 件)`,
     },
+    // ヒートマップのセルはデータ自己完結なので filter で窓外を間引ける (描画も軽くなる)
+    dataZoom: rowScroll(viewJobs.length, "hm-scroll-note", "filter"),
     grid: { left: gridLeft, right: 30, top: 20, bottom: 90 },
     xAxis: { type: "category", data: currentDates, axisLabel: { rotate: 45 } },
     yAxis: {
@@ -749,9 +782,10 @@ function render() {
   // ラベル領域の幅を最長ジョブ名に合わせる (凡例マーカー分も含めて余裕を持たせる)
   gridLeft = labelAreaWidth(viewJobs, 45);
   // 行数が変わるチャートの高さを表示ジョブ数に合わせる
-  tlEl.style.height = viewJobs.length * ROW_H_TL + 100 + "px";
+  const visRows = Math.min(viewJobs.length, SCROLL_ROWS);
+  tlEl.style.height = visRows * ROW_H_TL + 100 + "px";
   trendEl.style.height = Math.max(300, Math.min(viewJobs.length, TREND_MAX) * 24 + 80) + "px";
-  hmEl.style.height = viewJobs.length * ROW_H_HM + 120 + "px";
+  hmEl.style.height = visRows * ROW_H_HM + 120 + "px";
   tl.resize(); trend?.resize(); hm?.resize();
 
   stats = computeStats(fromMs, endMs);
@@ -894,6 +928,7 @@ function detailOption(dayStart, axisEnd) {
           `<span style="color:#90a4ae">クリックでビルドページを開く</span>`;
       },
     },
+    dataZoom: rowScroll(viewJobs.length, "detail-scroll-note"),
     grid: { left: gridLeft, right: 30, top: 20, bottom: 40 },
     xAxis: {
       type: "time",
@@ -989,7 +1024,7 @@ function renderDetail() {
   const axisEnd = dayStart + DAY_MS;
   // resize は旧データのまま先に行う (currentDetail 差し替え後だと旧系列の
   // 再描画が新配列を範囲外参照してしまう)
-  detailEl.style.height = viewJobs.length * 56 + 100 + "px"; // ラベル 3 行分
+  detailEl.style.height = Math.min(viewJobs.length, SCROLL_ROWS) * 56 + 100 + "px"; // ラベル 3 行分
   detailChart.resize();
   currentDetail = computeDetailSegments(dayStart, Math.min(axisEnd, DATA.now));
   detailStats = computeDetailStats(dayStart, axisEnd);
@@ -1126,6 +1161,7 @@ function nodeOption(dayStart, axisEnd) {
           `<span style="color:#90a4ae">クリックでビルドページを開く</span>`;
       },
     },
+    dataZoom: rowScroll(currentNodeRows.length, "node-scroll-note"),
     grid: { left: 250, right: 30, top: 20, bottom: 40 },
     xAxis: {
       type: "time",
@@ -1212,7 +1248,8 @@ function renderNode() {
   const axisEnd = dayStart + DAY_MS;
   const view = computeNodeView(dayStart, Math.min(axisEnd, DATA.now));
   // resize は旧データのまま先に行う (renderDetail と同じ理由)
-  nodeEl.style.height = Math.max(view.rows.length, 1) * Math.max(44, view.maxLanes * 18 + 20) + 100 + "px";
+  nodeEl.style.height =
+    Math.max(Math.min(view.rows.length, SCROLL_ROWS), 1) * Math.max(44, view.maxLanes * 18 + 20) + 100 + "px";
   nodeChart.resize();
   currentNodeRows = view.rows;
   currentNodeSegs = view.segs;
