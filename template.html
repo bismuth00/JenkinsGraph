@@ -103,6 +103,12 @@
 <div class="period" id="pipeline-controls" style="display: none;">
   絞り込み:
   <input type="text" id="pipeline-search" placeholder="検索 (ジョブ名 / #ビルド番号、スペース区切りで OR)">
+  並び順:
+  <select id="pipeline-sort">
+    <option value="start">開始時刻順</option>
+    <option value="span">全体が長い順</option>
+    <option value="queue">待機の合計が長い順</option>
+  </select>
   <span class="presets" id="pipeline-count"></span>
 </div>
 
@@ -1222,7 +1228,18 @@ function collectDescendants(oji, b, acc, guard) {
   }
 }
 
-function renderProfile(root, items) {
+// 時間の表示用 (例: 1時間5分 / 12分34秒 / 40秒)
+function fmtDurMs(ms) {
+  const total = Math.round(ms / 1000);
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  const s = total % 60;
+  if (h) return `${h}時間${m ? m + "分" : ""}`;
+  if (m) return `${m}分${s ? s + "秒" : ""}`;
+  return `${s}秒`;
+}
+
+function renderProfile({ root, items, span, queueSum }) {
   items.sort((a, b2) => a.b[0] - b2.b[0]);
 
   // 行 = ジョブ (親を先頭に、以降は最初に呼び出された順)。同じジョブの
@@ -1270,7 +1287,8 @@ function renderProfile(root, items) {
   head.className = "profile-head";
   head.innerHTML = `${DATA.jobs[root.oji]} #${rnum}` +
     `<span class="sub">${DATA.results[rcode]} / ${fmtTime(rts)} 〜 ${fmtTime(rts + rdur)}` +
-    ` / 呼び出し ${items.length - 1} ビルド</span>`;
+    ` / 呼び出し ${items.length - 1} ビルド` +
+    ` / 全体 ${fmtDurMs(span)} / 待機合計 ${fmtDurMs(queueSum)}</span>`;
   const el = document.createElement("div");
   // 並列実行がある場合は行を高くしてサブレーン分のスペースを確保する
   const rowH = Math.max(30, maxLanes * 20 + 12);
@@ -1395,7 +1413,15 @@ function renderPipeline() {
   const profiles = roots.map((root) => {
     const items = [root];
     collectDescendants(root.oji, root.b, items, new Set());
-    return { root, items };
+    // 並び替え用の指標: 全体の長さ (キュー投入〜最後の実行終了) と待機の合計
+    let minS = Infinity, maxE = 0, queueSum = 0;
+    for (const it of items) {
+      const [ts, , dur = 0, q = 0] = it.b;
+      minS = Math.min(minS, ts - q);
+      maxE = Math.max(maxE, ts + dur);
+      queueSum += q;
+    }
+    return { root, items, span: maxE - minS, queueSum };
   });
   const terms = document.getElementById("pipeline-search").value
     .trim().toLowerCase().split(/\s+/).filter(Boolean);
@@ -1413,9 +1439,17 @@ function renderPipeline() {
     pipelinesEl.innerHTML = '<p class="meta">絞り込みに一致するプロファイルはありません。</p>';
     return;
   }
-  for (const p of shown) renderProfile(p.root, p.items);
+  const sortMode = document.getElementById("pipeline-sort").value;
+  if (sortMode === "span") {
+    shown.sort((a, b) => b.span - a.span);
+  } else if (sortMode === "queue") {
+    shown.sort((a, b) => b.queueSum - a.queueSum);
+  } // start: roots の開始時刻順のまま
+
+  for (const p of shown) renderProfile(p);
 }
 document.getElementById("pipeline-search").addEventListener("input", renderPipeline);
+document.getElementById("pipeline-sort").addEventListener("change", renderPipeline);
 
 // ---- タブ切り替え ----
 
