@@ -78,6 +78,7 @@
 <div class="chart-tools">
   <button id="trend-all-on">全て表示</button>
   <button id="trend-all-off">全て非表示</button>
+  <span class="meta" id="trend-cap-note" style="margin-left: 8px;"></span>
 </div>
 <div id="trend"></div>
 </div>
@@ -443,19 +444,40 @@ function movingAvg(failMs, knownMs, w) {
   });
 }
 
+const TREND_MAX = DATA.trend_max ?? 50;
+
 function computeTrends(fromMs, endMs) {
   // ジョブごとの「1 日のうち失敗状態だった時間の割合」と、その 7 日移動平均。
   // 状態が分からない日 (最初のビルドより前) は null (線が途切れる)。
   const dates = [];
   for (let t = fromMs; t < endMs; t += DAY_MS) dates.push(dayKey(t));
-  const perJob = viewJobs.map((job, vi) => {
+
+  // ジョブが多すぎると線が描画できない/読めないため、上限を超えた場合は
+  // 期間内の失敗率 (時間ベース) ワースト上位のみに絞る
+  let vis = viewJobs.map((_, vi) => vi);
+  const capped = vis.length > TREND_MAX;
+  if (capped) {
+    const rate = (vi) => {
+      const { failMs, knownMs } = viewDaily[vi];
+      const known = knownMs.reduce((a, b) => a + b, 0);
+      return known ? failMs.reduce((a, b) => a + b, 0) / known : -1;
+    };
+    vis = vis
+      .map((vi) => [vi, rate(vi)])
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, TREND_MAX)
+      .map((x) => x[0])
+      .sort((a, b) => a - b); // 凡例は現在の並び順を保つ
+  }
+
+  const perJob = vis.map((vi) => {
     const { failMs, knownMs } = viewDaily[vi];
     const rates = knownMs.map((known, di) =>
       known ? Math.round((failMs[di] / known) * 100) : null
     );
-    return { name: job, rates, maRates: movingAvg(failMs, knownMs, MA_WINDOW) };
+    return { name: viewJobs[vi], rates, maRates: movingAvg(failMs, knownMs, MA_WINDOW) };
   });
-  return { dates, perJob };
+  return { dates, perJob, capped };
 }
 
 // ---- チャート ----
@@ -728,7 +750,7 @@ function render() {
   gridLeft = labelAreaWidth(viewJobs, 45);
   // 行数が変わるチャートの高さを表示ジョブ数に合わせる
   tlEl.style.height = viewJobs.length * ROW_H_TL + 100 + "px";
-  trendEl.style.height = Math.max(300, viewJobs.length * 24 + 80) + "px";
+  trendEl.style.height = Math.max(300, Math.min(viewJobs.length, TREND_MAX) * 24 + 80) + "px";
   hmEl.style.height = viewJobs.length * ROW_H_HM + 120 + "px";
   tl.resize(); trend?.resize(); hm?.resize();
 
@@ -736,7 +758,13 @@ function render() {
   currentSpans = computeSpans(fromMs, Math.min(endMs, DATA.now));
 
   tl.setOption(timelineOption(fromMs, axisMax), true);
-  trend?.setOption(trendOption(computeTrends(fromMs, endMs), trendSelected), true);
+  if (trend) {
+    const tData = computeTrends(fromMs, endMs);
+    trend.setOption(trendOption(tData, trendSelected), true);
+    document.getElementById("trend-cap-note").textContent = tData.capped
+      ? `表示ジョブが多いため失敗率ワースト上位 ${TREND_MAX} 件のみ表示中 (検索や「失敗があったジョブのみ」で絞り込めます)`
+      : "";
+  }
   if (hm) {
     const heat = computeHeatmap(fromMs, endMs);
     currentDates = heat.dates;
@@ -1524,6 +1552,7 @@ window.JG = {
   get DATA() { return DATA; },
   get viewIdx() { return viewIdx; },
   get viewJobs() { return viewJobs; },
+  get viewDaily() { return viewDaily; },
   get currentSpans() { return currentSpans; },
   get currentDetail() { return currentDetail; },
   get currentNodeSegs() { return currentNodeSegs; },

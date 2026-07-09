@@ -247,6 +247,7 @@ def main():
         "jenkins_url": cfg["jenkins"]["url"].rstrip("/"),
         "show_trend": bool(cfg["report"].get("show_trend", True)),
         "show_heatmap": bool(cfg["report"].get("show_heatmap", True)),
+        "trend_max": int(cfg["report"].get("trend_max_jobs", 50)),
         "tl_jobs": [1 if tl_filter(j) else 0 for j in jobs],
         "node_jobs": [1 if node_filter(j) else 0 for j in jobs],
         "pipe_jobs": [1 if pipe_filter(j) else 0 for j in jobs],
