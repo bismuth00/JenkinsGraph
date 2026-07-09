@@ -471,23 +471,17 @@ const trendEl = document.getElementById("trend");
 trendEl.style.height = Math.max(300, jobs.length * 24 + 80) + "px";
 const trend = DATA.show_trend ? echarts.init(trendEl) : null;
 let trendSelected = {}; // 凡例の ON/OFF 状態 (期間切り替え後も維持する)
-// ホバー中の線のジョブ (ツールチップにそのジョブだけを表示するための追跡。
-// 点マーカーを消しているため item トリガーでは反応せず、axis トリガー +
-// この値でのフィルタで実現する)
-let trendHoverVi = null;
+// マウスの Y 座標 (canvas 基準)。細い線を正確にホバーするのは難しいので、
+// ツールチップは「マウスに最も近い線のジョブ」を表示する方式にしている
+let trendMouseY = null;
 if (trend) {
   // クリックは legendselectchanged、legendSelect/legendUnSelect アクションは
   // 別イベントになるためすべて監視する
   for (const ev of ["legendselectchanged", "legendselected", "legendunselected"]) {
     trend.on(ev, (e) => { trendSelected = e.selected; });
   }
-  trend.on("mouseover", (p) => {
-    if (p.componentType === "series" && p.seriesId) {
-      trendHoverVi = Number(p.seriesId.split(":")[1]);
-    }
-  });
-  trend.on("mouseout", () => { trendHoverVi = null; });
-  trend.getZr().on("globalout", () => { trendHoverVi = null; });
+  trend.getZr().on("mousemove", (e) => { trendMouseY = e.offsetY; });
+  trend.getZr().on("globalout", () => { trendMouseY = null; });
 }
 
 function setAllTrendSeries(on) {
@@ -602,12 +596,22 @@ const PALETTE = ["#5470c6", "#91cc75", "#fac858", "#ee6666", "#73c0de",
 function trendOption(t, selected) {
   return {
     tooltip: {
-      // ホバーした線のジョブだけを表示する。線に乗っていないときは出さない
+      // マウスの Y 座標に最も近い線のジョブだけを表示する
+      // (細い線を正確にホバーしなくても、近づけばそのジョブが分かる)
       trigger: "axis",
       formatter: (ps) => {
-        if (trendHoverVi == null || !ps.length) return "";
-        const j = t.perJob[trendHoverVi];
-        if (!j) return "";
+        if (trendMouseY == null || !ps.length) return "";
+        let best = null;
+        for (const p of ps) {
+          if (p.value == null) continue;
+          const y = trend.convertToPixel({ yAxisIndex: 0 }, p.value);
+          const dist = Math.abs(y - trendMouseY);
+          if (!best || dist < best.dist) {
+            best = { dist, vi: Number(p.seriesId.split(":")[1]) };
+          }
+        }
+        if (!best || best.dist > 40) return ""; // どの線からも遠ければ出さない
+        const j = t.perJob[best.vi];
         const di = ps[0].dataIndex;
         const ma = j.maRates[di];
         const raw = j.rates[di];
@@ -1481,8 +1485,8 @@ window.addEventListener("resize", () => {
 
 // 動作確認用: コンソールから内部状態を参照するためのハンドル
 window.JG = {
-  get trendHover() { return trendHoverVi; },
-  set trendHover(v) { trendHoverVi = v; },
+  get trendMouseY() { return trendMouseY; },
+  set trendMouseY(v) { trendMouseY = v; },
   get DATA() { return DATA; },
   get viewIdx() { return viewIdx; },
   get viewJobs() { return viewJobs; },
