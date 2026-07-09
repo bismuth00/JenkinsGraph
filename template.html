@@ -1214,13 +1214,31 @@ function renderProfile(root, items) {
     }
   }
 
+  // 同じジョブの並列実行が重ならないよう、行内でサブレーンに割り当てる。
+  // キュー待ち + 実行を 1 つの区間として扱い、同じビルドは同じレーンに乗せる
+  const byRow = new Map();
+  for (const it of items) {
+    const [ts, , dur = 0, queuing = 0] = it.b;
+    const row = rowIndex.get(it.oji);
+    if (!byRow.has(row)) byRow.set(row, []);
+    byRow.get(row).push({ s: ts - queuing, e: ts + dur, it });
+  }
+  let maxLanes = 1;
+  const laneOf = new Map(); // item -> { lane, lanes }
+  for (const units of byRow.values()) {
+    const lanes = assignLanes(units);
+    units.forEach((u) => laneOf.set(u.it, { lane: u.lane, lanes }));
+    maxLanes = Math.max(maxLanes, lanes);
+  }
+
   const segs = [];
   for (const it of items) {
     const [ts, code, dur = 0, queuing = 0, number] = it.b;
     const row = rowIndex.get(it.oji);
     const res = DATA.results[code];
-    if (queuing > 0) segs.push({ row, s: ts - queuing, e: ts, kind: "queue", res, number, oji: it.oji });
-    segs.push({ row, s: ts, e: ts + dur, kind: "run", res, number, oji: it.oji });
+    const { lane, lanes } = laneOf.get(it);
+    if (queuing > 0) segs.push({ row, s: ts - queuing, e: ts, kind: "queue", res, number, oji: it.oji, lane, lanes });
+    segs.push({ row, s: ts, e: ts + dur, kind: "run", res, number, oji: it.oji, lane, lanes });
   }
 
   const fmtTime = (t) =>
@@ -1232,7 +1250,9 @@ function renderProfile(root, items) {
     `<span class="sub">${DATA.results[rcode]} / ${fmtTime(rts)} 〜 ${fmtTime(rts + rdur)}` +
     ` / 呼び出し ${items.length - 1} ビルド</span>`;
   const el = document.createElement("div");
-  el.style.height = rows.length * 30 + 80 + "px";
+  // 並列実行がある場合は行を高くしてサブレーン分のスペースを確保する
+  const rowH = Math.max(30, maxLanes * 20 + 12);
+  el.style.height = rows.length * rowH + 80 + "px";
   pipelinesEl.append(head, el);
 
   // X 軸は起点ビルドの実行開始からの経過時間 (分)。起点前のキュー待ちはマイナス
@@ -1290,10 +1310,15 @@ function renderProfile(root, items) {
         const yCenter = api.coord([api.value(1), api.value(0)])[1];
         const x1 = api.coord([api.value(1), 0])[0];
         const x2 = api.coord([api.value(2), 0])[0];
-        const rowH = api.size([0, 1])[1];
-        const h = Math.min(rowH * (d.kind === "run" ? 0.6 : 0.35), d.kind === "run" ? 18 : 10);
+        // サブレーン内の位置 (キュー待ちはレーン内で細く中央に)
+        const rowHpx = api.size([0, 1])[1];
+        const laneH = Math.min(18, (rowHpx - 10) / d.lanes);
+        const gap = 2;
+        const total = d.lanes * laneH + (d.lanes - 1) * gap;
+        const laneTop = yCenter - total / 2 + d.lane * (laneH + gap);
+        const h = d.kind === "run" ? laneH : Math.min(laneH * 0.55, 10);
         const rect = echarts.graphic.clipRectByRect(
-          { x: x1, y: yCenter - h / 2, width: Math.max(x2 - x1, 1), height: h },
+          { x: x1, y: laneTop + (laneH - h) / 2, width: Math.max(x2 - x1, 1), height: h },
           { x: params.coordSys.x, y: params.coordSys.y, width: params.coordSys.width, height: params.coordSys.height }
         );
         return rect && {
