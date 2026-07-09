@@ -196,6 +196,18 @@ const DARK_COLORS = {
 // キュー待ち: 明るい黄色 (結果の色と混ざらず、詰まりが目に付く)
 const QUEUE_COLOR = "#fdd835";
 const jobs = DATA.jobs;
+
+// ジョブ名を省略せずに表示するため、表示中の最長ラベルの実測幅から
+// チャート左側のラベル領域の幅を決める
+const measureCtx = document.createElement("canvas").getContext("2d");
+function labelAreaWidth(names, extra) {
+  measureCtx.font = "12px sans-serif";
+  let w = 0;
+  for (const n of names) w = Math.max(w, measureCtx.measureText(n).width);
+  return Math.max(250, Math.ceil(w) + extra);
+}
+let gridLeft = 250; // render() で表示ジョブに合わせて更新 (概要/詳細の各チャート共通)
+
 const OK_CODE = DATA.results.indexOf("SUCCESS");
 const FAIL_CODES = new Set(
   DATA.fail_results.map((r) => DATA.results.indexOf(r)).filter((i) => i >= 0)
@@ -514,7 +526,7 @@ function timelineOption(fromMs, axisMax) {
           `<span style="color:#90a4ae">クリックでビルドページを開く</span>`;
       },
     },
-    grid: { left: 250, right: 30, top: 20, bottom: 40 },
+    grid: { left: gridLeft, right: 30, top: 20, bottom: 40 },
     xAxis: { type: "time", min: fromMs, max: axisMax },
     yAxis: {
       type: "category",
@@ -524,8 +536,7 @@ function timelineOption(fromMs, axisMax) {
       axisLabel: {
         margin: 12,
         formatter: (job) => {
-          // rich テキストは overflow truncate が効かないため文字数で切り詰める
-          const name = job.length > 34 ? job.slice(0, 33) + "…" : job;
+          const name = job;
           const s = stats[job];
           if (!s || !s.total) return `{name|${name}}\n{dim|期間内ビルドなし}`;
           // 期間の前半→後半の失敗率の変化 (±5pt 以上で悪化/改善とみなす)
@@ -580,21 +591,15 @@ const PALETTE = ["#5470c6", "#91cc75", "#fac858", "#ee6666", "#73c0de",
 function trendOption(t, selected) {
   return {
     tooltip: {
-      trigger: "axis",
-      formatter: (ps) => {
-        // 同じジョブの移動平均と日次を 1 行にまとめる
-        const byJob = new Map();
-        for (const p of ps) {
-          const [kind, vi] = p.seriesId.split(":");
-          if (!byJob.has(vi)) byJob.set(vi, { name: p.seriesName, marker: p.marker });
-          byJob.get(vi)[kind] = p.value;
-        }
-        const lines = [ps[0].name];
-        for (const g of byJob.values()) {
-          if (g.ma == null && g.raw == null) continue;
-          lines.push(`${g.marker}${g.name}: ${MA_WINDOW}日平均 ${g.ma ?? "-"}% / 日次 ${g.raw ?? "-"}%`);
-        }
-        return lines.length > 1 ? lines.join("<br>") : `${ps[0].name}<br>データなし`;
+      // ホバーした線のジョブだけを表示する (axis だと全系列が並んでしまう)
+      trigger: "item",
+      formatter: (p) => {
+        const vi = Number(p.seriesId.split(":")[1]);
+        const j = t.perJob[vi];
+        const ma = j.maRates[p.dataIndex];
+        const raw = j.rates[p.dataIndex];
+        return `<b>${p.seriesName}</b><br>${t.dates[p.dataIndex]}<br>` +
+          `${MA_WINDOW}日平均 ${ma ?? "-"}% / 日次 ${raw ?? "-"}%`;
       },
     },
     animation: false, // ON/OFF 切り替え時のアニメーションなし
@@ -604,10 +609,9 @@ function trendOption(t, selected) {
       left: 0,
       top: "middle",
       selected, // クリックで ON/OFF、期間を変えても状態を引き継ぐ
-      formatter: (name) => (name.length > 20 ? name.slice(0, 19) + "…" : name),
     },
     // 他のチャートと X 軸位置を揃えるため left を合わせる (左は凡例のスペース)
-    grid: { left: 250, right: 30, top: 20, bottom: 70 },
+    grid: { left: gridLeft, right: 30, top: 20, bottom: 70 },
     xAxis: { type: "category", data: t.dates, boundaryGap: false, axisLabel: { rotate: 45 } },
     yAxis: { type: "value", min: 0, max: 100, axisLabel: { formatter: "{value}%" } },
     // ジョブごとに「日次の生値 (薄い細線)」と「移動平均 (太線)」の 2 系列。
@@ -648,14 +652,13 @@ function heatmapOption(values) {
         `<b>${viewJobs[p.value[1]]}</b><br>${currentDates[p.value[0]]}<br>` +
         `失敗率 ${p.value[2]}% (${p.value[3]}/${p.value[4]} 件)`,
     },
-    grid: { left: 250, right: 30, top: 20, bottom: 90 },
+    grid: { left: gridLeft, right: 30, top: 20, bottom: 90 },
     xAxis: { type: "category", data: currentDates, axisLabel: { rotate: 45 } },
     yAxis: {
       type: "category",
       data: viewJobs,
       inverse: true,
       triggerEvent: true, // ラベルクリックでジョブページを開く
-      axisLabel: { width: 230, overflow: "truncate" },
     },
     visualMap: {
       show: false, // 色分けの定義のみに使い、凡例バーは出さない
@@ -698,6 +701,8 @@ function render() {
   const axisMax = Math.min(endMs, DATA.now);       // 終了日が今日なら現在時刻まで
 
   computeView(fromMs, endMs);
+  // ラベル領域の幅を最長ジョブ名に合わせる (凡例マーカー分も含めて余裕を持たせる)
+  gridLeft = labelAreaWidth(viewJobs, 45);
   // 行数が変わるチャートの高さを表示ジョブ数に合わせる
   tlEl.style.height = viewJobs.length * ROW_H_TL + 100 + "px";
   trendEl.style.height = Math.max(300, viewJobs.length * 24 + 80) + "px";
@@ -838,7 +843,7 @@ function detailOption(dayStart, axisEnd) {
           `<span style="color:#90a4ae">クリックでビルドページを開く</span>`;
       },
     },
-    grid: { left: 250, right: 30, top: 20, bottom: 40 },
+    grid: { left: gridLeft, right: 30, top: 20, bottom: 40 },
     xAxis: {
       type: "time",
       min: dayStart,
@@ -855,7 +860,7 @@ function detailOption(dayStart, axisEnd) {
       axisLabel: {
         margin: 12,
         formatter: (job) => {
-          const name = job.length > 34 ? job.slice(0, 33) + "…" : job;
+          const name = job;
           const s = detailStats[job];
           if (!s || !s.known) return `{name|${name}}\n{dim|データなし}`;
           // 1 行目: 時間内訳 (状態別の待機 / 実行 / キュー待ち)。色はチャートと対応
@@ -1286,7 +1291,7 @@ function renderProfile(root, items) {
           `<span style="color:#90a4ae">クリックでビルドページを開く</span>`;
       },
     },
-    grid: { left: 250, right: 30, top: 10, bottom: 35 },
+    grid: { left: labelAreaWidth(rows, 25), right: 30, top: 10, bottom: 35 },
     xAxis: {
       type: "value",
       min: rel(minS) - pad,
@@ -1298,7 +1303,6 @@ function renderProfile(root, items) {
       data: rows,
       inverse: true,
       triggerEvent: true, // ラベルクリックでジョブページを開く
-      axisLabel: { width: 230, overflow: "truncate" },
     },
     series: [{
       type: "custom",
