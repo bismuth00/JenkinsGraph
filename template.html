@@ -854,7 +854,7 @@ function renderBoxChart(vi, dates) {
   const queueData = queueByDay.map((v) => (v.length ? boxStats(v) : EMPTY));
 
   const el = document.createElement("div");
-  el.style.height = "440px";
+  el.style.height = "620px";
   boxesEl.append(el);
   const chart = echarts.init(el);
   const axisTime = { formatter: (v) => fmtDurMs(v) };
@@ -872,8 +872,8 @@ function renderBoxChart(vi, dates) {
     },
     // 処理時間と待機時間はスケールが違う (秒〜数十分) ので上下 2 段に分ける
     grid: [
-      { left: 90, right: 30, top: 30, height: 140 },
-      { left: 90, right: 30, top: 240, height: 140 },
+      { left: 90, right: 30, top: 30, height: 220 },
+      { left: 90, right: 30, top: 320, height: 220 },
     ],
     xAxis: [
       { type: "category", gridIndex: 0, data: dates, axisLabel: { show: false } },
