@@ -112,6 +112,7 @@
     <option value="rate">稼働率順</option>
     <option value="builds">ビルド回数順</option>
   </select>
+  <label id="node-free-only-label" style="display: none;"><input type="checkbox" id="node-free-only"> 空きノードのみ表示</label>
   <span class="presets" id="node-count"></span>
   <span class="presets" id="node-free-count"></span>
 </div>
@@ -1302,6 +1303,7 @@ function computeNodeView(dayStart, dayEnd) {
     const runs = runsByRow[i];
     const executors = DATA.node_executors[i];
     const busy = runs.reduce((a, x) => a + (x.e - x.s), 0);
+    const deleted = !!DATA.node_deleted[i];
     // その日のオフライン帯 (行を出すかの判定にも使う)
     const off = (DATA.node_offline[i] || [])
       .map(([s, e]) => [Math.max(s, dayStart), Math.min(e, dayEnd)])
@@ -1309,7 +1311,10 @@ function computeNodeView(dayStart, dayEnd) {
     return {
       name,
       orig: i, // DATA.node_offline の index
-      deleted: !!DATA.node_deleted[i],
+      deleted,
+      // node_free_jobs の対象ジョブだけを実行 / 未実行の「空き」ノード
+      // (上の free カウントと同じ判定)
+      free: !!DATA.node_free && !deleted && runs.every((r) => DATA.node_free[r.oji]),
       runs, off, executors, busy,
       builds: runs.length,
       fails: runs.filter((x) => FAIL_CODES.has(DATA.results.indexOf(x.res))).length,
@@ -1320,6 +1325,9 @@ function computeNodeView(dayStart, dayEnd) {
   items = items.filter((it) => !it.deleted || it.runs.length || it.off.length);
   if (terms.length) {
     items = items.filter((it) => terms.some((t) => it.name.toLowerCase().includes(t)));
+  }
+  if (DATA.node_free && document.getElementById("node-free-only").checked) {
+    items = items.filter((it) => it.free);
   }
   if (sortMode === "rate") {
     items.sort((a, b) => b.rate - a.rate || a.name.localeCompare(b.name));
@@ -1339,7 +1347,7 @@ function computeNodeView(dayStart, dayEnd) {
     maxLanes = Math.max(maxLanes, it.runs.length ? lanes : 1);
     stats[it.name] = {
       busy: it.busy, builds: it.builds, fails: it.fails,
-      executors: it.executors, elapsed, deleted: it.deleted,
+      executors: it.executors, elapsed, deleted: it.deleted, free: it.free,
     };
   });
   return { rows: items.map((it) => it.name), segs, maxLanes, stats, free };
@@ -1394,12 +1402,14 @@ function nodeOption(dayStart, axisEnd) {
           }
           parts.push(`{dim|ビルド${s.builds}回}`);
           if (s.fails) parts.push(`{ng|失敗${s.fails}}`);
-          // 削除済みノードは名前ごとグレーにして区別する
-          return `{${deleted ? "delname" : "name"}|${label}}\n${parts.join("{sep| }")}`;
+          // 削除済みノードは名前ごとグレー、空きノードは [空き] バッジで区別する
+          const tag = s.free ? "{free| [空き]}" : "";
+          return `{${deleted ? "delname" : "name"}|${label}}${tag}\n${parts.join("{sep| }")}`;
         },
         rich: {
           name: { align: "right", color: "#263238", lineHeight: 16 },
           delname: { align: "right", color: "#90a4ae", lineHeight: 16 },
+          free: { color: "#00897b", fontSize: 11, lineHeight: 16, fontWeight: "bold" },
           run: { color: "#1b5e20", fontSize: 10, lineHeight: 13, fontWeight: "bold" },
           ng: { color: "#c62828", fontSize: 10, lineHeight: 13 },
           sep: { color: "#90a4ae", fontSize: 10, lineHeight: 13 },
@@ -1473,6 +1483,11 @@ function renderNode() {
 }
 document.getElementById("node-search").addEventListener("input", renderNode);
 document.getElementById("node-sort").addEventListener("change", renderNode);
+document.getElementById("node-free-only").addEventListener("change", renderNode);
+// node_free_jobs 設定時のみ、空きノードの絞り込みを出す
+if (DATA.node_free) {
+  document.getElementById("node-free-only-label").style.display = "";
+}
 
 // ---- パイプライン実行プロファイル (1 日単位) ----
 // UpstreamCause (どのビルドから起動されたか) を使って「親ビルド → 呼び出された
