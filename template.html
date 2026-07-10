@@ -862,8 +862,9 @@ function renderBoxChart(vi, dates) {
     animation: false,
     tooltip: {
       formatter: (p) => {
-        const d = p.data;
-        if (!d || isNaN(d[0])) return "";
+        // boxplot の値は先頭にカテゴリ index が付く: [idx, 最小, Q1, 中央値, Q3, 最大]
+        const d = (p.data || []).slice(-5);
+        if (d.length < 5 || isNaN(d[0])) return "";
         const f = (i) => fmtDurMs(d[i]);
         return `<b>${viewJobs[vi]}</b><br>` +
           `${dates[p.dataIndex]} の${p.seriesName} (${counts[p.dataIndex]} ビルド)<br>` +
