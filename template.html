@@ -35,6 +35,9 @@
 
 <div class="tabs">
   <button id="tab-overview" class="active">概要</button>
+  <button id="tab-trend">失敗率の推移</button>
+  <button id="tab-heatmap">ヒートマップ</button>
+  <button id="tab-box">処理時間</button>
   <button id="tab-detail">詳細タイムライン</button>
   <button id="tab-node">ノード</button>
   <button id="tab-pipeline">パイプライン</button>
@@ -54,8 +57,7 @@
   <span class="presets" id="job-count"></span>
 </div>
 
-<div id="view-overview">
-<div class="period">
+<div class="period" id="period-controls">
   表示期間:
   <input type="date" id="from">
   〜
@@ -64,6 +66,7 @@
   <span id="presets"></span>
 </div>
 
+<div id="view-overview">
 <h2>タイムライン</h2>
 <div class="legend">
   <span><i style="background:#66bb6a"></i>SUCCESS</span>
@@ -73,8 +76,9 @@
   <span class="meta" id="tl-scroll-note" style="margin-left: 12px;"></span>
 </div>
 <div id="timeline"></div>
+</div>
 
-<div id="sec-trend">
+<div id="view-trend" style="display: none;">
 <h2>日別失敗率の推移 — 1日のうち失敗状態だった時間の割合</h2>
 <div class="chart-tools">
   <button id="trend-all-on">全て表示</button>
@@ -84,11 +88,17 @@
 <div id="trend"></div>
 </div>
 
-<div id="sec-heatmap">
+<div id="view-heatmap" style="display: none;">
 <h2>日別ヒートマップ — ビルドの失敗率</h2>
 <div class="meta" id="hm-scroll-note"></div>
 <div id="heatmap"></div>
 </div>
+
+<div id="view-box" style="display: none;">
+<h2>処理時間と待機時間の分布 — 日別の箱ひげ図</h2>
+<div class="meta">箱 = その日のビルドの四分位範囲 (Q1〜Q3)、箱の中の線 = 中央値、ひげ = 最小〜最大</div>
+<div class="meta" id="box-cap-note"></div>
+<div id="boxplots"></div>
 </div>
 
 <div class="period" id="node-controls" style="display: none;">
@@ -521,19 +531,18 @@ tlEl.style.height = jobs.length * ROW_H_TL + 100 + "px";
 const tl = echarts.init(tlEl);
 
 // 推移グラフとヒートマップは config の report.show_trend / show_heatmap で
-// ON/OFF できる。OFF ならセクションごと非表示にして初期化もしない
-document.getElementById("sec-trend").style.display = DATA.show_trend ? "" : "none";
-document.getElementById("sec-heatmap").style.display = DATA.show_heatmap ? "" : "none";
+// ON/OFF できる。OFF ならタブごと非表示にする
+document.getElementById("tab-trend").style.display = DATA.show_trend ? "" : "none";
+document.getElementById("tab-heatmap").style.display = DATA.show_heatmap ? "" : "none";
 
 const trendEl = document.getElementById("trend");
-// 左の縦並び凡例が全ジョブ収まる高さを確保する
-trendEl.style.height = Math.max(300, jobs.length * 24 + 80) + "px";
-const trend = DATA.show_trend ? echarts.init(trendEl) : null;
+let trend = null; // タブを開いたときに初期化 (非表示中は幅が取れないため)
 let trendSelected = {}; // 凡例の ON/OFF 状態 (期間切り替え後も維持する)
 // マウスの Y 座標 (canvas 基準)。細い線を正確にホバーするのは難しいので、
 // ツールチップは「マウスに最も近い線のジョブ」を表示する方式にしている
 let trendMouseY = null;
-if (trend) {
+function initTrend() {
+  trend = echarts.init(trendEl);
   // クリックは legendselectchanged、legendSelect/legendUnSelect アクションは
   // 別イベントになるためすべて監視する
   for (const ev of ["legendselectchanged", "legendselected", "legendunselected"]) {
@@ -553,8 +562,7 @@ document.getElementById("trend-all-on").addEventListener("click", () => setAllTr
 document.getElementById("trend-all-off").addEventListener("click", () => setAllTrendSeries(false));
 
 const hmEl = document.getElementById("heatmap");
-hmEl.style.height = jobs.length * ROW_H_HM + 120 + "px";
-const hm = DATA.show_heatmap ? echarts.init(hmEl) : null;
+let hm = null; // タブを開いたときに初期化 (非表示中は幅が取れないため)
 
 let currentSpans = [];
 let currentDates = [];
@@ -574,9 +582,6 @@ tl.on("click", (p) => {
   if (p.componentType === "yAxis") return openJobPage(p.value);
   const d = currentSpans[p.dataIndex];
   if (d && p.componentType === "series") openBuildPage(viewIdx[d[0]], d[4]);
-});
-hm?.on("click", (p) => {
-  if (p.componentType === "yAxis") openJobPage(p.value);
 });
 
 function timelineOption(fromMs, axisMax) {
@@ -767,6 +772,146 @@ const toInput = document.getElementById("to");
 fromInput.min = toInput.min = MIN_DATE;
 fromInput.max = toInput.max = MAX_DATE;
 
+// render() で確定した表示期間。推移・ヒートマップのタブを後から開いたときに使う
+let curFromMs = 0;
+let curEndMs = 0;
+
+// 失敗率の推移 (専用タブ)。タブを開いて初期化されるまでは何もしない
+function renderTrend() {
+  if (!trend) return;
+  // 左の縦並び凡例が表示ジョブ分収まる高さを確保する
+  trendEl.style.height =
+    Math.max(300, Math.min(viewJobs.length, TREND_MAX) * 24 + 80) + "px";
+  trend.resize();
+  const tData = computeTrends(curFromMs, curEndMs);
+  trend.setOption(trendOption(tData, trendSelected), true);
+  document.getElementById("trend-cap-note").textContent = tData.capped
+    ? `表示ジョブが多いため失敗率ワースト上位 ${TREND_MAX} 件のみ表示中 (検索や「失敗があったジョブのみ」で絞り込めます)`
+    : "";
+}
+
+// 日別ヒートマップ (専用タブ)。同上
+function renderHeatmap() {
+  if (!hm) return;
+  hmEl.style.height = Math.min(viewJobs.length, SCROLL_ROWS) * ROW_H_HM + 120 + "px";
+  hm.resize();
+  const heat = computeHeatmap(curFromMs, curEndMs);
+  currentDates = heat.dates;
+  hm.setOption(heatmapOption(heat.values), true);
+}
+
+// ---- 処理時間・待機時間の箱ひげ図 (専用タブ、ジョブごとに 1 チャート) ----
+
+const boxesEl = document.getElementById("boxplots");
+let boxCharts = [];
+// チャートをジョブごとに縦に並べるため、一度に描くジョブ数の上限
+// (config の report.box_max_jobs)
+const BOX_MAX = DATA.box_max ?? 20;
+
+// p 分位点 (線形補間)。sorted は昇順ソート済みであること
+function quantile(sorted, p) {
+  const idx = (sorted.length - 1) * p;
+  const lo = Math.floor(idx);
+  const hi = Math.min(lo + 1, sorted.length - 1);
+  return sorted[lo] + (sorted[hi] - sorted[lo]) * (idx - lo);
+}
+
+// 箱ひげの [最小, Q1, 中央値, Q3, 最大]
+function boxStats(values) {
+  const a = [...values].sort((x, y) => x - y);
+  return [a[0], quantile(a, 0.25), quantile(a, 0.5), quantile(a, 0.75), a[a.length - 1]];
+}
+
+function renderBoxChart(vi, dates) {
+  const oji = viewIdx[vi];
+  const durByDay = dates.map(() => []);
+  const queueByDay = dates.map(() => []);
+  for (const b of DATA.builds[oji]) {
+    const [ts, , dur = 0, queuing = 0] = b;
+    if (ts < curFromMs || ts >= curEndMs) continue;
+    const di = Math.floor((ts - curFromMs) / DAY_MS);
+    durByDay[di].push(dur);
+    queueByDay[di].push(queuing);
+  }
+  const counts = durByDay.map((v) => v.length);
+  const total = counts.reduce((a, b) => a + b, 0);
+
+  const head = document.createElement("div");
+  head.className = "profile-head";
+  head.innerHTML = `${viewJobs[vi]}<span class="sub">期間内 ${total} ビルド</span>`;
+  boxesEl.append(head);
+  if (!total) {
+    const p = document.createElement("p");
+    p.className = "meta";
+    p.textContent = "期間内にビルドがありません。";
+    boxesEl.append(p);
+    return;
+  }
+
+  // 日ごとの箱ひげ。ビルドがない日は NaN にして箱を描かない
+  const EMPTY = [NaN, NaN, NaN, NaN, NaN];
+  const durData = durByDay.map((v) => (v.length ? boxStats(v) : EMPTY));
+  const queueData = queueByDay.map((v) => (v.length ? boxStats(v) : EMPTY));
+
+  const el = document.createElement("div");
+  el.style.height = "440px";
+  boxesEl.append(el);
+  const chart = echarts.init(el);
+  const axisTime = { formatter: (v) => fmtDurMs(v) };
+  chart.setOption({
+    animation: false,
+    tooltip: {
+      formatter: (p) => {
+        const d = p.data;
+        if (!d || isNaN(d[0])) return "";
+        const f = (i) => fmtDurMs(d[i]);
+        return `<b>${viewJobs[vi]}</b><br>` +
+          `${dates[p.dataIndex]} の${p.seriesName} (${counts[p.dataIndex]} ビルド)<br>` +
+          `最大 ${f(4)}<br>Q3 ${f(3)}<br>中央値 ${f(2)}<br>Q1 ${f(1)}<br>最小 ${f(0)}`;
+      },
+    },
+    // 処理時間と待機時間はスケールが違う (秒〜数十分) ので上下 2 段に分ける
+    grid: [
+      { left: 90, right: 30, top: 30, height: 140 },
+      { left: 90, right: 30, top: 240, height: 140 },
+    ],
+    xAxis: [
+      { type: "category", gridIndex: 0, data: dates, axisLabel: { show: false } },
+      { type: "category", gridIndex: 1, data: dates, axisLabel: { rotate: 45 } },
+    ],
+    yAxis: [
+      { type: "value", gridIndex: 0, name: "処理時間", axisLabel: axisTime, min: 0 },
+      { type: "value", gridIndex: 1, name: "待機時間", axisLabel: axisTime, min: 0 },
+    ],
+    series: [
+      {
+        name: "処理時間", type: "boxplot", xAxisIndex: 0, yAxisIndex: 0, data: durData,
+        itemStyle: { color: "#e8eaf6", borderColor: "#3949ab" },
+      },
+      {
+        // キュー待ちの帯と同系の黄色 (枠はラベルと同じ暗めのトーン)
+        name: "待機時間", type: "boxplot", xAxisIndex: 1, yAxisIndex: 1, data: queueData,
+        itemStyle: { color: "#fff9c4", borderColor: "#9c7a00" },
+      },
+    ],
+  });
+  boxCharts.push(chart);
+}
+
+function renderBox() {
+  if (document.getElementById("view-box").style.display === "none") return;
+  boxCharts.forEach((c) => c.dispose());
+  boxCharts = [];
+  boxesEl.innerHTML = "";
+  const dates = [];
+  for (let t = curFromMs; t < curEndMs; t += DAY_MS) dates.push(dayKey(t));
+  const n = Math.min(viewJobs.length, BOX_MAX);
+  document.getElementById("box-cap-note").textContent = viewJobs.length > BOX_MAX
+    ? `表示ジョブが多いため先頭 ${BOX_MAX} 件のみ表示中 (検索や並び順で絞り込めます)`
+    : "";
+  for (let vi = 0; vi < n; vi++) renderBoxChart(vi, dates);
+}
+
 function render() {
   // 入力をデータ範囲に収め、開始 > 終了なら開始に合わせる
   if (!fromInput.value) fromInput.value = MIN_DATE;
@@ -780,31 +925,21 @@ function render() {
   const axisMax = Math.min(endMs, DATA.now);       // 終了日が今日なら現在時刻まで
 
   computeView(fromMs, endMs);
+  curFromMs = fromMs;
+  curEndMs = endMs;
   // ラベル領域の幅を最長ジョブ名に合わせる (凡例マーカー分も含めて余裕を持たせる)
   gridLeft = labelAreaWidth(viewJobs, 45);
   // 行数が変わるチャートの高さを表示ジョブ数に合わせる
-  const visRows = Math.min(viewJobs.length, SCROLL_ROWS);
-  tlEl.style.height = visRows * ROW_H_TL + 100 + "px";
-  trendEl.style.height = Math.max(300, Math.min(viewJobs.length, TREND_MAX) * 24 + 80) + "px";
-  hmEl.style.height = visRows * ROW_H_HM + 120 + "px";
-  tl.resize(); trend?.resize(); hm?.resize();
+  tlEl.style.height = Math.min(viewJobs.length, SCROLL_ROWS) * ROW_H_TL + 100 + "px";
+  tl.resize();
 
   stats = computeStats(fromMs, endMs);
   currentSpans = computeSpans(fromMs, Math.min(endMs, DATA.now));
 
   tl.setOption(timelineOption(fromMs, axisMax), true);
-  if (trend) {
-    const tData = computeTrends(fromMs, endMs);
-    trend.setOption(trendOption(tData, trendSelected), true);
-    document.getElementById("trend-cap-note").textContent = tData.capped
-      ? `表示ジョブが多いため失敗率ワースト上位 ${TREND_MAX} 件のみ表示中 (検索や「失敗があったジョブのみ」で絞り込めます)`
-      : "";
-  }
-  if (hm) {
-    const heat = computeHeatmap(fromMs, endMs);
-    currentDates = heat.dates;
-    hm.setOption(heatmapOption(heat.values), true);
-  }
+  renderTrend();
+  renderHeatmap();
+  renderBox();
 
   const days = Math.round((endMs - fromMs) / DAY_MS);
   document.getElementById("meta").textContent =
@@ -1540,22 +1675,36 @@ document.getElementById("pipeline-sort").addEventListener("change", renderPipeli
 
 // ---- タブ切り替え ----
 
+const TABS = ["overview", "trend", "heatmap", "box", "detail", "node", "pipeline"];
+
 function showTab(name) {
-  document.getElementById("view-overview").style.display = name === "overview" ? "" : "none";
-  document.getElementById("view-detail").style.display = name === "detail" ? "" : "none";
-  document.getElementById("view-node").style.display = name === "node" ? "" : "none";
-  document.getElementById("view-pipeline").style.display = name === "pipeline" ? "" : "none";
-  document.getElementById("day-controls").style.display = name === "overview" ? "none" : "";
-  // ジョブの絞り込みはジョブ単位のタブ (概要/詳細)、ノードの絞り込みはノードタブにだけ表示する
+  for (const t of TABS) {
+    document.getElementById("view-" + t).style.display = name === t ? "" : "none";
+    document.getElementById("tab-" + t).classList.toggle("active", name === t);
+  }
+  // 期間で見るタブには期間選択、日単位のタブには日付送りを表示する
+  const daily = name === "detail" || name === "node" || name === "pipeline";
+  document.getElementById("period-controls").style.display = daily ? "none" : "";
+  document.getElementById("day-controls").style.display = daily ? "" : "none";
+  // ジョブの絞り込みはジョブ単位のタブ、ノードの絞り込みはノードタブにだけ表示する
   document.getElementById("job-controls").style.display =
     name === "node" || name === "pipeline" ? "none" : "";
   document.getElementById("node-controls").style.display = name === "node" ? "" : "none";
   document.getElementById("pipeline-controls").style.display = name === "pipeline" ? "" : "none";
-  document.getElementById("tab-overview").classList.toggle("active", name === "overview");
-  document.getElementById("tab-detail").classList.toggle("active", name === "detail");
-  document.getElementById("tab-node").classList.toggle("active", name === "node");
-  document.getElementById("tab-pipeline").classList.toggle("active", name === "pipeline");
-  if (name === "detail") {
+  if (name === "trend") {
+    if (!trend && DATA.show_trend) initTrend();
+    renderTrend();
+  } else if (name === "heatmap") {
+    if (!hm && DATA.show_heatmap) {
+      hm = echarts.init(hmEl);
+      hm.on("click", (p) => {
+        if (p.componentType === "yAxis") openJobPage(p.value);
+      });
+    }
+    renderHeatmap();
+  } else if (name === "box") {
+    renderBox();
+  } else if (name === "detail") {
     if (!detailChart) {
       detailChart = echarts.init(detailEl);
       detailChart.on("click", (p) => {
@@ -1587,13 +1736,12 @@ function showTab(name) {
     renderPipeline();
   } else {
     // 非表示中はサイズが取れないので、表示に戻ったタイミングで再計算
-    tl.resize(); trend?.resize(); hm?.resize();
+    tl.resize();
   }
 }
-document.getElementById("tab-overview").addEventListener("click", () => showTab("overview"));
-document.getElementById("tab-detail").addEventListener("click", () => showTab("detail"));
-document.getElementById("tab-node").addEventListener("click", () => showTab("node"));
-document.getElementById("tab-pipeline").addEventListener("click", () => showTab("pipeline"));
+for (const t of TABS) {
+  document.getElementById("tab-" + t).addEventListener("click", () => showTab(t));
+}
 
 // デフォルトの表示期間は直近 30 日 (データがそれより短い場合は render() が範囲内に補正)
 fromInput.value = dayKey(daysAgo(29));
@@ -1602,6 +1750,7 @@ render();
 window.addEventListener("resize", () => {
   tl.resize(); trend?.resize(); hm?.resize(); detailChart?.resize(); nodeChart?.resize();
   pipelineCharts.forEach((c) => c.resize());
+  boxCharts.forEach((c) => c.resize());
 });
 
 // 動作確認用: コンソールから内部状態を参照するためのハンドル
@@ -1618,6 +1767,7 @@ window.JG = {
   get currentNodeRows() { return currentNodeRows; },
   get nodeStats() { return nodeStats; },
   get pipelineCharts() { return pipelineCharts; },
+  get boxCharts() { return boxCharts; },
 };
 })();
 </script>
