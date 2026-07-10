@@ -142,6 +142,7 @@
   <span><i style="background:#bdbdbd"></i>ABORTED</span>
   <span style="margin-left:12px;"><i style="background:#2e7d32"></i><i style="background:#b71c1c"></i><i style="background:#ef6c00"></i><i style="background:#757575"></i>ビルド実行中(結果の濃色)</span>
   <span><i style="background:#fdd835"></i>キュー待ち</span>
+  <span style="color:#78909c;">同一ジョブの並行ビルドは行内で縦に積んで表示</span>
   <span class="meta" id="detail-scroll-note" style="margin-left: 12px;"></span>
 </div>
 <div id="detail"></div>
@@ -1014,26 +1015,43 @@ function computeDetailStats(dayStart, dayEnd) {
   return stats;
 }
 
-// 1 日分の区間 [表示行idx, 開始ms, 終了ms, 結果名, 種別, ビルド番号] を作る。種別は
+// 1 日分の区間 [表示行idx, 開始ms, 終了ms, 結果名, 種別, ビルド番号, レーン, レーン数]
+// を作る。種別は
 // "queue" (キュー待機: キュー投入 timestamp - queuing 〜 実行開始 timestamp)、
 // "run" (ビルド実行中: timestamp 〜 + duration)、
 // "idle" (実行終了〜次のビルドのキュー投入、直前の結果のままの状態)。
 // Jenkins の timestamp は実行開始時刻で、キュー待ちはその前に発生している。
 // 最初のビルドより前は状態不明なので描かない。
+// 同一ジョブの並行ビルドは、キュー待ち + 実行を 1 ユニットとして行内の
+// サブレーンに割り当てて縦に積む (パイプラインタブと同じ方式)。
+// idle はジョブ全体の状態なので行の中央に描く。
 function computeDetailSegments(dayStart, dayEnd) {
   const segs = [];
-  const push = (vi, s, e, code, kind, number) => {
-    s = Math.max(s, dayStart);
-    e = Math.min(e, dayEnd);
-    if (e > s) segs.push([vi, s, e, DATA.results[code], kind, number]);
-  };
+  let maxLanes = 1;
   viewIdx.forEach((oji, vi) => {
     const builds = DATA.builds[oji];
     const disabled = DATA.disabled[oji];
+    // その日に見えるビルドをサブレーンに割り当てる
+    const units = [];
+    builds.forEach((b, i) => {
+      const [ts, , dur = 0, queuing = 0] = b;
+      const s = Math.max(ts - queuing, dayStart);
+      const e = Math.min(ts + dur, dayEnd);
+      if (e > s) units.push({ s, e, i });
+    });
+    const lanes = assignLanes(units);
+    maxLanes = Math.max(maxLanes, lanes);
+    const laneOf = new Map(units.map((u) => [u.i, u.lane]));
+    const push = (s, e, code, kind, number, lane) => {
+      s = Math.max(s, dayStart);
+      e = Math.min(e, dayEnd);
+      if (e > s) segs.push([vi, s, e, DATA.results[code], kind, number, lane ?? 0, lanes]);
+    };
     builds.forEach((b, i) => {
       const [ts, code, dur = 0, queuing = 0, number] = b;
-      if (queuing > 0) push(vi, ts - queuing, ts, code, "queue", number);
-      push(vi, ts, ts + dur, code, "run", number);
+      const lane = laneOf.get(i);
+      if (queuing > 0) push(ts - queuing, ts, code, "queue", number, lane);
+      push(ts, ts + dur, code, "run", number, lane);
       if (b[6]) return; // 次のビルドと番号が連続していない = 間は状態不明
       const isLast = i + 1 >= builds.length;
       if (isLast && disabled) return; // 無効化されたジョブは最後の実行以降を描かない
@@ -1042,10 +1060,10 @@ function computeDetailSegments(dayStart, dayEnd) {
         const next = builds[i + 1];
         idleEnd = next[0] - (next[3] || 0); // 次のビルドのキュー投入まで
       }
-      push(vi, ts + dur, idleEnd, code, "idle", number);
+      push(ts + dur, idleEnd, code, "idle", number, lane);
     });
   });
-  return segs;
+  return { segs, maxLanes };
 }
 
 function detailOption(dayStart, axisEnd) {
@@ -1127,18 +1145,34 @@ function detailOption(dayStart, axisEnd) {
       renderItem: (params, api) => {
         const d = currentDetail[params.dataIndex];
         if (!d) return null;
-        const y = api.coord([api.value(1), api.value(0)])[1];
+        const yCenter = api.coord([api.value(1), api.value(0)])[1];
         const x1 = api.coord([api.value(1), 0])[0];
         const x2 = api.coord([api.value(2), 0])[0];
-        const run = d[4] === "run";
-        // ビルド中は少し太くして目立たせる
-        const h = Math.min(api.size([0, 1])[1] * (run ? 0.8 : 0.45), run ? 22 : 14);
+        const rowH = api.size([0, 1])[1];
+        const kind = d[4];
+        let y, h;
+        if (kind === "idle") {
+          // idle はジョブ全体の状態なので行の中央に描く
+          h = Math.min(rowH * 0.45, 14);
+          y = yCenter - h / 2;
+        } else {
+          // 並行ビルドはサブレーンに縦積み。行の高さは変えず、レーン数が
+          // 多い行だけバーを細くして行内 (隙間込み) に収める。
+          // ビルド実行はレーン幅いっぱいに太く、キュー待ちはレーン内で細く描く
+          const lanes = d[7] || 1;
+          const gap = 2;
+          const laneH = Math.min(22, (rowH - 16 - (lanes - 1) * gap) / lanes);
+          const total = lanes * laneH + (lanes - 1) * gap;
+          const laneTop = yCenter - total / 2 + (d[6] || 0) * (laneH + gap);
+          h = kind === "run" ? laneH : Math.min(laneH * 0.64, 14);
+          y = laneTop + (laneH - h) / 2;
+        }
         const rect = echarts.graphic.clipRectByRect(
-          { x: x1, y: y - h / 2, width: Math.max(x2 - x1, 1), height: h },
+          { x: x1, y, width: Math.max(x2 - x1, 1), height: h },
           { x: params.coordSys.x, y: params.coordSys.y, width: params.coordSys.width, height: params.coordSys.height }
         );
-        const fill = run ? DARK_COLORS[d[3]]
-          : d[4] === "queue" ? QUEUE_COLOR
+        const fill = kind === "run" ? DARK_COLORS[d[3]]
+          : kind === "queue" ? QUEUE_COLOR
           : COLORS[d[3]];
         return rect && {
           type: "rect",
@@ -1159,11 +1193,16 @@ function renderDetail() {
 
   const dayStart = parseDate(detailDate.value);
   const axisEnd = dayStart + DAY_MS;
+  const view = computeDetailSegments(dayStart, Math.min(axisEnd, DATA.now));
+  // 行の高さはラベル 3 行分 (56px) を下限に、並行ビルドのサブレーン分を
+  // 4 レーンまで広げる。5 レーン以上は 4 レーン分の高さの中で細く分割する
+  // (renderItem 側の laneH 計算が行の高さに合わせて縮む)。
   // resize は旧データのまま先に行う (currentDetail 差し替え後だと旧系列の
   // 再描画が新配列を範囲外参照してしまう)
-  detailEl.style.height = Math.min(viewJobs.length, SCROLL_ROWS) * 56 + 100 + "px"; // ラベル 3 行分
+  const rowH = Math.max(56, Math.min(view.maxLanes, 4) * 24 + 16);
+  detailEl.style.height = Math.min(viewJobs.length, SCROLL_ROWS) * rowH + 100 + "px";
   detailChart.resize();
-  currentDetail = computeDetailSegments(dayStart, Math.min(axisEnd, DATA.now));
+  currentDetail = view.segs;
   detailStats = computeDetailStats(dayStart, axisEnd);
   detailChart.setOption(detailOption(dayStart, axisEnd), true);
 }
