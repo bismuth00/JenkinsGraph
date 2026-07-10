@@ -101,6 +101,7 @@
     <option value="builds">ビルド回数順</option>
   </select>
   <span class="presets" id="node-count"></span>
+  <span class="presets" id="node-free-count"></span>
 </div>
 
 <div class="period" id="pipeline-controls" style="display: none;">
@@ -1094,6 +1095,19 @@ function computeNodeView(dayStart, dayEnd) {
     }
   });
 
+  // 「対象ジョブ (config の node_free_jobs) のみ実行 / 未実行」のノード数。
+  // 現存ノード全体で数える (ノード名検索の影響を受けない)
+  let free = null;
+  if (DATA.node_free) {
+    let n = 0, total = 0;
+    ALL_NODE_ROWS.forEach((name, i) => {
+      if (DATA.node_deleted[i]) return;
+      total++;
+      if (runsByRow[i].every((r) => DATA.node_free[r.oji])) n++;
+    });
+    free = { n, total };
+  }
+
   const elapsed = Math.max(dayEnd - dayStart, 1);
   let items = ALL_NODE_ROWS.map((name, i) => {
     const runs = runsByRow[i];
@@ -1139,7 +1153,7 @@ function computeNodeView(dayStart, dayEnd) {
       executors: it.executors, elapsed, deleted: it.deleted,
     };
   });
-  return { rows: items.map((it) => it.name), segs, maxLanes, stats };
+  return { rows: items.map((it) => it.name), segs, maxLanes, stats, free };
 }
 
 function nodeOption(dayStart, axisEnd) {
@@ -1259,6 +1273,14 @@ function renderNode() {
     view.rows.length === ALL_NODE_ROWS.length
       ? `全 ${ALL_NODE_ROWS.length} ノード`
       : `${view.rows.length} / ${ALL_NODE_ROWS.length} ノード`;
+  const freeEl = document.getElementById("node-free-count");
+  if (view.free) {
+    freeEl.textContent = `対象ジョブのみ/未実行: ${view.free.n} / ${view.free.total} ノード`;
+    freeEl.title = `対象ジョブ (${DATA.node_free_jobs.join(", ")}) だけを実行した、` +
+      `または何も実行していない現存ノードの数 (この日)`;
+  } else {
+    freeEl.textContent = "";
+  }
 }
 document.getElementById("node-search").addEventListener("input", renderNode);
 document.getElementById("node-sort").addEventListener("change", renderNode);

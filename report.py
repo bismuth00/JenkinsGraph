@@ -234,6 +234,13 @@ def main():
     builds, results = encode_builds(rows, jobs, node_index, window_start_ms)
     disabled, urls = load_jobs_meta(cfg["db"]["path"])
 
+    # ノードタブの「対象ジョブのみ実行 / 未実行」ノード数の対象パターン
+    free_patterns = list(cfg["report"].get("node_free_jobs", []))
+    free_filter = (
+        compile_filter(cfg, {"include": free_patterns}, "report.node_free_jobs")
+        if free_patterns else None
+    )
+
     data = {
         "generated_at": now.strftime("%Y-%m-%d %H:%M"),
         "days": days,
@@ -252,6 +259,8 @@ def main():
         "tl_jobs": [1 if tl_filter(j) else 0 for j in jobs],
         "node_jobs": [1 if node_filter(j) else 0 for j in jobs],
         "pipe_jobs": [1 if pipe_filter(j) else 0 for j in jobs],
+        "node_free_jobs": free_patterns,
+        "node_free": [1 if free_filter(j) else 0 for j in jobs] if free_patterns else None,
         "nodes": [n if n else "(built-in)" for n in node_names],
         "node_executors": [executors.get(n, 1) for n in node_names],
         "node_deleted": [0 if n in current_nodes else 1 for n in node_names],
