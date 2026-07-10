@@ -1552,8 +1552,10 @@ function renderProfile({ root, items, span, queueSum }) {
     ` / 呼び出し ${items.length - 1} ビルド` +
     ` / 全体 ${fmtDurMs(span)} / 待機合計 ${fmtDurMs(queueSum)}</span>`;
   const el = document.createElement("div");
-  // 並列実行がある場合は行を高くしてサブレーン分のスペースを確保する
-  const rowH = Math.max(30, maxLanes * 20 + 12);
+  // 並列実行がある場合は行を高くしてサブレーン分のスペースを確保する。
+  // 広げるのは 4 レーンまでで、5 レーン以上は 4 レーン分の高さの中で
+  // バーを細く分割して収める (renderItem 側の laneH 計算が縮む)
+  const rowH = Math.max(30, Math.min(maxLanes, 4) * 20 + 12);
   el.style.height = rows.length * rowH + 80 + "px";
   pipelinesEl.append(head, el);
 
@@ -1611,10 +1613,11 @@ function renderProfile({ root, items, span, queueSum }) {
         const yCenter = api.coord([api.value(1), api.value(0)])[1];
         const x1 = api.coord([api.value(1), 0])[0];
         const x2 = api.coord([api.value(2), 0])[0];
-        // サブレーン内の位置 (キュー待ちはレーン内で細く中央に)
+        // サブレーン内の位置 (キュー待ちはレーン内で細く中央に)。
+        // レーン数が行の高さ (4 レーン分まで) を超える場合は細く分割する
         const rowHpx = api.size([0, 1])[1];
-        const laneH = Math.min(18, (rowHpx - 10) / d.lanes);
         const gap = 2;
+        const laneH = Math.min(18, (rowHpx - 10 - (d.lanes - 1) * gap) / d.lanes);
         const total = d.lanes * laneH + (d.lanes - 1) * gap;
         const laneTop = yCenter - total / 2 + d.lane * (laneH + gap);
         const h = d.kind === "run" ? laneH : Math.min(laneH * 0.55, 10);
