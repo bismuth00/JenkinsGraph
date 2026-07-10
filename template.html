@@ -1022,8 +1022,10 @@ function computeDetailStats(dayStart, dayEnd) {
 // "idle" (実行終了〜次のビルドのキュー投入、直前の結果のままの状態)。
 // Jenkins の timestamp は実行開始時刻で、キュー待ちはその前に発生している。
 // 最初のビルドより前は状態不明なので描かない。
-// 同一ジョブの並行ビルドは、キュー待ち + 実行を 1 ユニットとして行内の
-// サブレーンに割り当てて縦に積む (パイプラインタブと同じ方式)。
+// 同一ジョブの並行ビルドは、行内のサブレーンに割り当てて縦に積む
+// (パイプラインタブと同じ方式)。レーンの判定は実行区間のみで行い、
+// キュー待ちは含めない (前のビルドの実行中にキューイングされただけで
+// 別レーンに落ちるのを防ぐ。キュー待ちのバーの多少の重なりは許容)。
 // idle はジョブ全体の状態なので行の中央に描く。
 function computeDetailSegments(dayStart, dayEnd) {
   const segs = [];
@@ -1034,12 +1036,12 @@ function computeDetailSegments(dayStart, dayEnd) {
     // その日に見えるビルドをサブレーンに割り当てる
     const units = [];
     builds.forEach((b, i) => {
-      const [ts, , dur = 0, queuing = 0] = b;
-      const s = Math.max(ts - queuing, dayStart);
+      const [ts, , dur = 0] = b;
+      const s = Math.max(ts, dayStart);
       const e = Math.min(ts + dur, dayEnd);
       if (e > s) units.push({ s, e, i });
     });
-    const lanes = assignLanes(units);
+    const lanes = assignLanes(units, true);
     maxLanes = Math.max(maxLanes, lanes);
     const laneOf = new Map(units.map((u) => [u.i, u.lane]));
     const push = (s, e, code, kind, number, lane) => {
@@ -1233,18 +1235,22 @@ const OFFLINE_COLOR = "#e0e0e0";
 const ALL_NODE_ROWS = [...DATA.nodes];
 let currentNodeRows = []; // 絞り込み・並び替え後の表示行 (ノード名)
 
-// 重なる区間をレーンに割り当てる (開始順に、空いている最初のレーンへ)
-function assignLanes(segs) {
+// 重なる区間をレーンに割り当てる (開始順に、空いている最初のレーンへ)。
+// tolerant 指定時は、前の区間の末尾とのわずかな重なり (区間の長さの 25%、
+// 最大 2 分) を同じレーンに載せる (詳細タイムライン用。逐次実行が
+// わずかな重なりで交互に別レーンへ落ちてがたがたになるのを防ぐ)
+function assignLanes(segs, tolerant) {
   segs.sort((a, b) => a.s - b.s);
   const laneEnds = [];
   for (const seg of segs) {
-    let lane = laneEnds.findIndex((end) => end <= seg.s);
+    const tol = tolerant ? Math.min(120000, (seg.e - seg.s) * 0.25) : 0;
+    let lane = laneEnds.findIndex((end) => end - tol <= seg.s);
     if (lane < 0) {
       lane = laneEnds.length;
       laneEnds.push(0);
     }
     seg.lane = lane;
-    laneEnds[lane] = seg.e;
+    laneEnds[lane] = Math.max(laneEnds[lane], seg.e);
   }
   return Math.max(laneEnds.length, 1);
 }
