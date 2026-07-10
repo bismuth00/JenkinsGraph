@@ -1041,7 +1041,7 @@ function computeDetailSegments(dayStart, dayEnd) {
       const e = Math.min(ts + dur, dayEnd);
       if (e > s) units.push({ s, e, i });
     });
-    const lanes = assignLanes(units, true);
+    const lanes = assignLanes(units);
     maxLanes = Math.max(maxLanes, lanes);
     const laneOf = new Map(units.map((u) => [u.i, u.lane]));
     const push = (s, e, code, kind, number, lane) => {
@@ -1197,11 +1197,11 @@ function renderDetail() {
   const axisEnd = dayStart + DAY_MS;
   const view = computeDetailSegments(dayStart, Math.min(axisEnd, DATA.now));
   // 行の高さはラベル 3 行分 (56px) を下限に、並行ビルドのサブレーン分を
-  // 4 レーンまで広げる。5 レーン以上は 4 レーン分の高さの中で細く分割する
+  // 8 レーンまで広げる。9 レーン以上は 8 レーン分の高さの中で細く分割する
   // (renderItem 側の laneH 計算が行の高さに合わせて縮む)。
   // resize は旧データのまま先に行う (currentDetail 差し替え後だと旧系列の
   // 再描画が新配列を範囲外参照してしまう)
-  const rowH = Math.max(56, Math.min(view.maxLanes, 4) * 24 + 16);
+  const rowH = Math.max(56, Math.min(view.maxLanes, 8) * 24 + 16);
   detailEl.style.height = Math.min(viewJobs.length, SCROLL_ROWS) * rowH + 100 + "px";
   detailChart.resize();
   currentDetail = view.segs;
@@ -1236,14 +1236,14 @@ const ALL_NODE_ROWS = [...DATA.nodes];
 let currentNodeRows = []; // 絞り込み・並び替え後の表示行 (ノード名)
 
 // 重なる区間をレーンに割り当てる (開始順に、空いている最初のレーンへ)。
-// tolerant 指定時は、前の区間の末尾とのわずかな重なり (区間の長さの 25%、
-// 最大 2 分) を同じレーンに載せる (詳細タイムライン用。逐次実行が
-// わずかな重なりで交互に別レーンへ落ちてがたがたになるのを防ぐ)
-function assignLanes(segs, tolerant) {
+// 前の区間の末尾とのわずかな重なり (区間の長さの 25%、最大 2 分) は
+// 同じレーンに載せる。逐次実行がわずかな重なりで交互に別レーンへ落ちて
+// がたがたになるのを防ぐ (多少のバーの重なりは許容する)
+function assignLanes(segs) {
   segs.sort((a, b) => a.s - b.s);
   const laneEnds = [];
   for (const seg of segs) {
-    const tol = tolerant ? Math.min(120000, (seg.e - seg.s) * 0.25) : 0;
+    const tol = Math.min(120000, (seg.e - seg.s) * 0.25);
     let lane = laneEnds.findIndex((end) => end - tol <= seg.s);
     if (lane < 0) {
       lane = laneEnds.length;
@@ -1522,13 +1522,14 @@ function renderProfile({ root, items, span, queueSum }) {
   }
 
   // 同じジョブの並列実行が重ならないよう、行内でサブレーンに割り当てる。
-  // キュー待ち + 実行を 1 つの区間として扱い、同じビルドは同じレーンに乗せる
+  // レーンの判定は実行区間のみ (キュー待ちは含めない)。同じビルドの
+  // キュー待ちバーは実行と同じレーンに乗せる
   const byRow = new Map();
   for (const it of items) {
-    const [ts, , dur = 0, queuing = 0] = it.b;
+    const [ts, , dur = 0] = it.b;
     const row = rowIndex.get(it.oji);
     if (!byRow.has(row)) byRow.set(row, []);
-    byRow.get(row).push({ s: ts - queuing, e: ts + dur, it });
+    byRow.get(row).push({ s: ts, e: ts + dur, it });
   }
   let maxLanes = 1;
   const laneOf = new Map(); // item -> { lane, lanes }
@@ -1559,9 +1560,9 @@ function renderProfile({ root, items, span, queueSum }) {
     ` / 全体 ${fmtDurMs(span)} / 待機合計 ${fmtDurMs(queueSum)}</span>`;
   const el = document.createElement("div");
   // 並列実行がある場合は行を高くしてサブレーン分のスペースを確保する。
-  // 広げるのは 4 レーンまでで、5 レーン以上は 4 レーン分の高さの中で
+  // 広げるのは 8 レーンまでで、9 レーン以上は 8 レーン分の高さの中で
   // バーを細く分割して収める (renderItem 側の laneH 計算が縮む)
-  const rowH = Math.max(30, Math.min(maxLanes, 4) * 20 + 12);
+  const rowH = Math.max(30, Math.min(maxLanes, 8) * 20 + 12);
   el.style.height = rows.length * rowH + 80 + "px";
   pipelinesEl.append(head, el);
 
