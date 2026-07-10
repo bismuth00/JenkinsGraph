@@ -1032,10 +1032,8 @@ function computeDetailStats(dayStart, dayEnd) {
 // "idle" (実行終了〜次のビルドのキュー投入、直前の結果のままの状態)。
 // Jenkins の timestamp は実行開始時刻で、キュー待ちはその前に発生している。
 // 最初のビルドより前は状態不明なので描かない。
-// 同一ジョブの並行ビルドは、行内のサブレーンに割り当てて縦に積む
-// (パイプラインタブと同じ方式)。レーンの判定は実行区間のみで行い、
-// キュー待ちは含めない (前のビルドの実行中にキューイングされただけで
-// 別レーンに落ちるのを防ぐ。キュー待ちのバーの多少の重なりは許容)。
+// 同一ジョブの並行ビルドは、キュー待ち + 実行を 1 ユニットとして行内の
+// サブレーンに割り当てて縦に積む (パイプラインタブと同じ方式)。
 // idle はジョブ全体の状態なので行の中央に描く。
 function computeDetailSegments(dayStart, dayEnd) {
   const segs = [];
@@ -1046,8 +1044,8 @@ function computeDetailSegments(dayStart, dayEnd) {
     // その日に見えるビルドをサブレーンに割り当てる
     const units = [];
     builds.forEach((b, i) => {
-      const [ts, , dur = 0] = b;
-      const s = Math.max(ts, dayStart);
+      const [ts, , dur = 0, queuing = 0] = b;
+      const s = Math.max(ts - queuing, dayStart);
       const e = Math.min(ts + dur, dayEnd);
       if (e > s) units.push({ s, e, i });
     });
@@ -1532,14 +1530,13 @@ function renderProfile({ root, items, span, queueSum }) {
   }
 
   // 同じジョブの並列実行が重ならないよう、行内でサブレーンに割り当てる。
-  // レーンの判定は実行区間のみ (キュー待ちは含めない)。同じビルドの
-  // キュー待ちバーは実行と同じレーンに乗せる
+  // キュー待ち + 実行を 1 つの区間として扱い、同じビルドは同じレーンに乗せる
   const byRow = new Map();
   for (const it of items) {
-    const [ts, , dur = 0] = it.b;
+    const [ts, , dur = 0, queuing = 0] = it.b;
     const row = rowIndex.get(it.oji);
     if (!byRow.has(row)) byRow.set(row, []);
-    byRow.get(row).push({ s: ts, e: ts + dur, it });
+    byRow.get(row).push({ s: ts - queuing, e: ts + dur, it });
   }
   let maxLanes = 1;
   const laneOf = new Map(); // item -> { lane, lanes }
