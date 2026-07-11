@@ -316,11 +316,13 @@ const TL_MASK = DATA.tl_jobs;
 const NODE_MASK = DATA.node_jobs;
 const PIPE_MASK = DATA.pipe_jobs;
 
-function computeViewFor(mask, fromMs, endMs) {
+function computeViewFor(mask, fromMs, endMs, ignoreFailedOnly) {
   const days = Math.round((endMs - fromMs) / DAY_MS);
   const terms = document.getElementById("job-search").value
     .trim().toLowerCase().split(/\s+/).filter(Boolean);
-  const failedOnly = document.getElementById("failed-only").checked;
+  // ignoreFailedOnly: 詳細タイムライン用。「失敗があったジョブのみ」は
+  // 期間ではなく表示中の日で判定するため、ここでは適用しない
+  const failedOnly = !ignoreFailedOnly && document.getElementById("failed-only").checked;
   const showDisabled = document.getElementById("show-disabled").checked;
   const sortMode = document.getElementById("job-sort").value;
 
@@ -1001,22 +1003,33 @@ let detailIdx = [];
 let detailJobs = [];
 
 // 詳細タイムラインの表示ジョブと並び順を決める。基本は共通の表示ジョブ
-// (検索・絞り込み・並び順) をそのまま使うが、「失敗率ワースト順」のときは
-// 選択中の表示期間ではなく「表示中の日」の時間ベース失敗率で並べ直す
-// (日単位のタブでは期間よりその日の状況で見たいため)
+// (検索・絞り込み・並び順) をそのまま使うが、日単位のタブでは期間より
+// その日の状況で見たいため、次の 2 つは「表示中の日」を基準にする:
+// - 「失敗があったジョブのみ」: その日に失敗状態の時間があったジョブ
+//   (期間の絞り込みを外して作り直すので、期間内に失敗がないジョブも対象)
+// - 「失敗率ワースト順」: その日の時間ベース失敗率で並べ直す
 function computeDetailView(dayStart) {
-  detailIdx = [...viewIdx];
-  detailJobs = [...viewJobs];
+  const dayDaily = (oji) =>
+    dailyFailTime(DATA.builds[oji], dayStart, 1, DATA.disabled[oji]);
+  if (document.getElementById("failed-only").checked) {
+    const base = computeViewFor(TL_MASK, curFromMs, curEndMs, true)
+      .filter((x) => dayDaily(x.ji).failMs[0] > 0);
+    detailIdx = base.map((x) => x.ji);
+    detailJobs = base.map((x) => x.name);
+  } else {
+    detailIdx = [...viewIdx];
+    detailJobs = [...viewJobs];
+  }
   if (document.getElementById("job-sort").value !== "fail") return;
-  const rate = viewIdx.map((oji) => {
-    const { failMs, knownMs } = dailyFailTime(DATA.builds[oji], dayStart, 1, DATA.disabled[oji]);
+  const rate = detailIdx.map((oji) => {
+    const { failMs, knownMs } = dayDaily(oji);
     return knownMs[0] ? failMs[0] / knownMs[0] : -1;
   });
-  const order = viewIdx.map((_, i) => i).sort(
-    (a, b) => rate[b] - rate[a] || viewJobs[a].localeCompare(viewJobs[b])
+  const order = detailIdx.map((_, i) => i).sort(
+    (a, b) => rate[b] - rate[a] || detailJobs[a].localeCompare(detailJobs[b])
   );
-  detailIdx = order.map((i) => viewIdx[i]);
-  detailJobs = order.map((i) => viewJobs[i]);
+  detailIdx = order.map((i) => detailIdx[i]);
+  detailJobs = order.map((i) => detailJobs[i]);
 }
 
 // その日の時間内訳 (状態別の待機 / 実行 / キュー待ち) とビルド回数・結果数を集計する
