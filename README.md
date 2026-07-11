@@ -1,7 +1,8 @@
 # JenkinsGraph
 
-Jenkins のビルド履歴を定期収集して SQLite に蓄積し、静的 HTML レポート
-(失敗期間のタイムライン + 日別失敗率ヒートマップ) を生成するツール。
+Jenkins のビルド履歴を定期収集して SQLite に蓄積し、Jenkins 全体の健全性
+(ジョブの失敗状況・処理時間と待機時間・ノードの稼働状況・パイプラインの
+実行プロファイル) を可視化する静的 HTML レポートを生成するツール。
 
 ```
 cron ──> collect.py ──> jenkins.db (SQLite) ──> report.py ──> report.html
