@@ -696,8 +696,13 @@ function trendOption(t, selected) {
       top: "middle",
       selected, // クリックで ON/OFF、期間を変えても状態を引き継ぐ
     },
-    // 他のチャートと X 軸位置を揃えるため left を合わせる (左は凡例のスペース)
-    grid: { left: gridLeft, right: 30, top: 20, bottom: 70 },
+    // 左の余白 = 凡例 (パディング + アイコン + 最長ジョブ名) に
+    // Y 軸の % ラベルの幅を足したもの。表示中 (上限適用後) の
+    // ジョブ名から計算し、% ラベルと重ならないようにする
+    grid: {
+      left: labelAreaWidth(t.perJob.map((j) => j.name), 120),
+      right: 30, top: 20, bottom: 70,
+    },
     xAxis: { type: "category", data: t.dates, boundaryGap: false, axisLabel: { rotate: 45 } },
     yAxis: { type: "value", min: 0, max: 100, axisLabel: { formatter: "{value}%" } },
     // ジョブごとに「日次の生値 (薄い細線)」と「移動平均 (太線)」の 2 系列。
