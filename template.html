@@ -1464,6 +1464,8 @@ function nodeOption(dayStart, axisEnd) {
         return rect && {
           type: "rect",
           shape: rect,
+          // ビルド帯は常にオフライン帯より手前に描く (重なってもホバーはビルド優先)
+          z2: d.kind === "off" ? 0 : 10,
           style: { fill: d.kind === "off" ? OFFLINE_COLOR : DARK_COLORS[d.res] || "#90a4ae" },
         };
       },
