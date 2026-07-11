@@ -41,26 +41,30 @@ def load_builds(db_path):
 
 
 def load_jobs_meta(db_path):
-    """jobs テーブルから (無効ジョブ名の集合, ジョブ名 -> URL) を返す。
+    """jobs テーブルから (無効ジョブ名の集合, ジョブ名 -> URL,
+    ジョブ名 -> 並列実行可否) を返す。並列実行可否は 1/0/None (不明)。
 
     テーブルやカラムがない古い DB では空を返す (URL は呼び出し側で組み立てる)。
     """
     conn = sqlite3.connect(db_path)
     tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     if "jobs" not in tables:
-        return set(), {}
+        return set(), {}, {}
     cols = {r[1] for r in conn.execute("PRAGMA table_info(jobs)")}
     url_col = "url" if "url" in cols else "''"
+    concurrent_col = "concurrent" if "concurrent" in cols else "NULL"
     disabled = set()
     urls = {}
-    for name, buildable, url in conn.execute(
-        f"SELECT job_name, buildable, {url_col} FROM jobs"
+    concurrent = {}
+    for name, buildable, url, conc in conn.execute(
+        f"SELECT job_name, buildable, {url_col}, {concurrent_col} FROM jobs"
     ):
         if not buildable:
             disabled.add(name)
         if url:
             urls[name] = url
-    return disabled, urls
+        concurrent[name] = conc
+    return disabled, urls, concurrent
 
 
 def load_nodes(db_path):
@@ -232,7 +236,7 @@ def main():
         current_nodes = set(node_names)
 
     builds, results = encode_builds(rows, jobs, node_index, window_start_ms)
-    disabled, urls = load_jobs_meta(cfg["db"]["path"])
+    disabled, urls, concurrent = load_jobs_meta(cfg["db"]["path"])
 
     # ノードタブの「対象ジョブのみ実行 / 未実行」ノード数の対象パターン
     free_patterns = list(cfg["report"].get("node_free_jobs", []))
@@ -250,6 +254,7 @@ def main():
         "results": results,
         "fail_results": FAIL_RESULTS,
         "disabled": [1 if j in disabled else 0 for j in jobs],
+        "concurrent": [1 if concurrent.get(j) else 0 for j in jobs],
         "job_urls": [job_url(cfg["jenkins"]["url"], j, urls) for j in jobs],
         "jenkins_url": cfg["jenkins"]["url"].rstrip("/"),
         "show_trend": bool(cfg["report"].get("show_trend", True)),

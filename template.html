@@ -1012,6 +1012,8 @@ function computeDetailStats(dayStart, dayEnd) {
   }
   viewIdx.forEach((oji, vi) => {
     const st = stats[viewJobs[vi]];
+    // ジョブ設定の並列実行の可否 (バッジ表示用)。古い DB では常に 0
+    st.concurrent = DATA.concurrent ? DATA.concurrent[oji] : 0;
     for (const [ts, code] of DATA.builds[oji]) {
       if (ts < dayStart || ts >= dayEnd) continue;
       st.builds++;
@@ -1127,7 +1129,9 @@ function detailOption(dayStart, axisEnd) {
         formatter: (job) => {
           const name = job;
           const s = detailStats[job];
-          if (!s || !s.known) return `{name|${name}}\n{dim|データなし}`;
+          // ジョブ設定で並列実行が可能なジョブはバッジで示す
+          const tag = s && s.concurrent ? "{par| [並列可]}" : "";
+          if (!s || !s.known) return `{name|${name}}${tag}\n{dim|データなし}`;
           // 1 行目: 時間内訳 (状態別の待機 / 実行 / キュー待ち)。色はチャートと対応
           const pct = (ms) => Math.round((ms / s.known) * 100);
           const RICH = { SUCCESS: "ok", FAILURE: "ng", UNSTABLE: "un", ABORTED: "ab" };
@@ -1146,10 +1150,11 @@ function detailOption(dayStart, axisEnd) {
           const buildLine = s.builds
             ? `{dim|ビルド${s.builds}回 (}${cnt}{dim|)}`
             : "{dim|ビルドなし}";
-          return `{name|${name}}\n${parts.join("{sep| }")}\n${buildLine}`;
+          return `{name|${name}}${tag}\n${parts.join("{sep| }")}\n${buildLine}`;
         },
         rich: {
           name: { align: "right", color: "#263238", lineHeight: 16 },
+          par: { color: "#5e35b1", fontSize: 10, lineHeight: 16, fontWeight: "bold" },
           ok: { color: "#2e7d32", fontSize: 10, lineHeight: 13 },
           ng: { color: "#c62828", fontSize: 10, lineHeight: 13 },
           un: { color: "#ef6c00", fontSize: 10, lineHeight: 13 },

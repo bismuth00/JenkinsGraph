@@ -26,9 +26,10 @@ CREATE TABLE IF NOT EXISTS builds (
     PRIMARY KEY (job_name, number)
 );
 CREATE TABLE IF NOT EXISTS jobs (
-    job_name  TEXT PRIMARY KEY,
-    buildable INTEGER NOT NULL DEFAULT 1,  -- 0 = Jenkins 上で無効化されている
-    url       TEXT NOT NULL DEFAULT ''     -- ジョブページの URL (ビルドページはこれ + 番号)
+    job_name   TEXT PRIMARY KEY,
+    buildable  INTEGER NOT NULL DEFAULT 1,  -- 0 = Jenkins 上で無効化されている
+    url        TEXT NOT NULL DEFAULT '',    -- ジョブページの URL (ビルドページはこれ + 番号)
+    concurrent INTEGER                      -- 1 = 並列実行可 (concurrentBuild)。NULL = 不明
 );
 CREATE TABLE IF NOT EXISTS nodes (
     node_name TEXT PRIMARY KEY,            -- ビルトインノードは '' で記録
@@ -57,6 +58,8 @@ def migrate(conn):
     job_cols = {r[1] for r in conn.execute("PRAGMA table_info(jobs)")}
     if job_cols and "url" not in job_cols:
         conn.execute("ALTER TABLE jobs ADD COLUMN url TEXT NOT NULL DEFAULT ''")
+    if job_cols and "concurrent" not in job_cols:
+        conn.execute("ALTER TABLE jobs ADD COLUMN concurrent INTEGER")
 
 # _class にこれらを含むものはジョブではなくコンテナとして再帰的にたどる
 CONTAINER_CLASS_KEYWORDS = ("Folder", "MultiBranchProject", "OrganizationFolder")
@@ -74,13 +77,15 @@ def load_config(path):
 
 def iter_jobs(session, root_url):
     """フォルダ・マルチブランチを再帰的にたどり、ビルドを持つジョブを
-    (fullName, url, buildable) で列挙する。buildable=False は無効化されたジョブ。"""
+    (fullName, url, buildable, concurrent) で列挙する。
+    buildable=False は無効化されたジョブ。concurrent は並列実行の可否
+    (concurrentBuild)。フィールドを返さないジョブ種別では None (不明)。"""
     stack = [root_url.rstrip("/") + "/"]
     while stack:
         url = stack.pop()
         res = session.get(
             url + "api/json",
-            params={"tree": "jobs[_class,fullName,url,buildable]"},
+            params={"tree": "jobs[_class,fullName,url,buildable,concurrentBuild]"},
             timeout=30,
         )
         res.raise_for_status()
@@ -89,7 +94,9 @@ def iter_jobs(session, root_url):
             if any(k in cls for k in CONTAINER_CLASS_KEYWORDS):
                 stack.append(job["url"])
             else:
-                yield job["fullName"], job["url"], job.get("buildable", True)
+                concurrent = job.get("concurrentBuild")
+                yield (job["fullName"], job["url"], job.get("buildable", True),
+                       None if concurrent is None else (1 if concurrent else 0))
 
 
 def fetch_new_builds(session, job_url, since_number):
@@ -175,14 +182,15 @@ def main():
 
     job_filter = compile_filter(cfg)
     total = 0
-    for name, url, buildable in iter_jobs(session, cfg["jenkins"]["url"]):
+    for name, url, buildable, concurrent in iter_jobs(session, cfg["jenkins"]["url"]):
         if not job_filter(name):
             continue
         conn.execute(
-            "INSERT INTO jobs (job_name, buildable, url) VALUES (?, ?, ?)"
+            "INSERT INTO jobs (job_name, buildable, url, concurrent) VALUES (?, ?, ?, ?)"
             " ON CONFLICT(job_name) DO UPDATE SET"
-            " buildable = excluded.buildable, url = excluded.url",
-            (name, 1 if buildable else 0, url),
+            " buildable = excluded.buildable, url = excluded.url,"
+            " concurrent = excluded.concurrent",
+            (name, 1 if buildable else 0, url, concurrent),
         )
         since = conn.execute(
             "SELECT MAX(number) FROM builds WHERE job_name = ?", (name,)
