@@ -76,36 +76,62 @@ def load_nodes(db_path):
         executors = dict(conn.execute("SELECT node_name, executors FROM nodes"))
     samples = []
     if "node_status" in tables:
+        # temp_offline / offline_reason は後から追加されたカラム。古い DB では NULL 扱い
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(node_status)")}
+        temp = "temp_offline" if "temp_offline" in cols else "NULL"
+        reason = "offline_reason" if "offline_reason" in cols else "NULL"
         samples = conn.execute(
-            "SELECT sampled_at, node_name, offline FROM node_status"
+            f"SELECT sampled_at, node_name, offline, {temp}, {reason} FROM node_status"
             " ORDER BY node_name, sampled_at"
         ).fetchall()
     return executors, samples
 
 
 def offline_intervals(samples, node_index, window_start_ms, now_ms, current):
-    """node_status のサンプル列からノードごとのオフライン区間 [開始ms, 終了ms] を作る。
+    """node_status のサンプル列からノードごとのオフライン区間
+    [開始ms, 終了ms, 種別, 理由] を作る (種別 0 + 理由なしは末尾を省略)。
 
-    オフラインのサンプルが続く間を 1 区間にまとめる。区間の終わりは次に
-    オンラインが観測された時刻。最後までオフラインの場合、現存ノードは
-    現在時刻まで、削除済みノード (current に含まれない) は最後に観測された
-    時刻までとする。粒度は収集間隔に依存する。
+    種別: 0 = 不明 (旧 DB のサンプル)、1 = 手動 (temporarilyOffline)、
+    2 = 接続断など (自発的でないオフライン)。
+    オフラインのサンプルが続く間を 1 区間にまとめ、種別や理由が変わったら
+    区間を分割する。区間の終わりは次にオンラインが観測された時刻。
+    最後までオフラインの場合、現存ノードは現在時刻まで、削除済みノード
+    (current に含まれない) は最後に観測された時刻までとする。
+    粒度は収集間隔に依存する。
     """
     intervals = [[] for _ in node_index]
-    cur = {}
+
+    def emit(name, start, end, kind, reason):
+        if end <= start:
+            return
+        iv = [start, end, kind, reason]
+        if not reason:
+            iv.pop()
+            if not kind:
+                iv.pop()
+        intervals[node_index[name]].append(iv)
+
+    cur = {}  # name -> [開始ms, 種別, 理由]
     last_seen = {}
-    for t, name, offline in samples:  # ノード名, 時刻順
+    for t, name, offline, temp, reason in samples:  # ノード名, 時刻順
         if name not in node_index:
             continue
         last_seen[name] = t
-        if offline and name not in cur:
-            cur[name] = t
-        elif not offline and name in cur:
-            intervals[node_index[name]].append([cur.pop(name), t])
-    for name, start in cur.items():
+        if offline:
+            kind = 0 if temp is None else (1 if temp else 2)
+            reason = reason or ""
+            c = cur.get(name)
+            if c is None:
+                cur[name] = [t, kind, reason]
+            elif c[1] != kind or c[2] != reason:
+                emit(name, c[0], t, c[1], c[2])
+                cur[name] = [t, kind, reason]
+        elif name in cur:
+            c = cur.pop(name)
+            emit(name, c[0], t, c[1], c[2])
+    for name, c in cur.items():
         end = now_ms if name in current else last_seen[name]
-        if end > start:
-            intervals[node_index[name]].append([start, end])
+        emit(name, c[0], end, c[1], c[2])
     for lst in intervals:
         lst[:] = [iv for iv in lst if iv[1] > window_start_ms]
     return intervals
@@ -230,8 +256,8 @@ def main():
     # 最新のサンプリング時点に存在するノード = 現存。それ以外は削除済みとみなす
     # (node_status が空の古い DB では判定できないので全ノードを現存扱い)
     if node_samples:
-        latest = max(t for t, _, _ in node_samples)
-        current_nodes = {name for t, name, _ in node_samples if t == latest}
+        latest = max(s[0] for s in node_samples)
+        current_nodes = {s[1] for s in node_samples if s[0] == latest}
     else:
         current_nodes = set(node_names)
 

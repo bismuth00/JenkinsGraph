@@ -155,7 +155,8 @@
 <h2>ノードタイムライン</h2>
 <div class="legend">
   <span><i style="background:#2e7d32"></i><i style="background:#b71c1c"></i><i style="background:#ef6c00"></i><i style="background:#757575"></i>ビルド実行(結果の濃色)</span>
-  <span><i style="background:#e0e0e0"></i>オフライン</span>
+  <span><i style="background:#e0e0e0"></i>オフライン(手動/不明)</span>
+  <span><i style="background:#e9caca"></i>オフライン(接続断など)</span>
   <span style="color:#78909c;">並列実行は行内で縦に積んで表示 (実行ノード不明のビルドは表示されません)</span>
   <span class="meta" id="node-scroll-note" style="margin-left: 12px;"></span>
 </div>
@@ -1279,7 +1280,16 @@ const nodeEl = document.getElementById("nodechart");
 let nodeChart = null;
 let currentNodeSegs = [];
 let nodeStats = {};
-const OFFLINE_COLOR = "#e0e0e0";
+const OFFLINE_COLOR = "#e0e0e0";      // 手動 / 種別不明のオフライン
+const OFFLINE_DISC_COLOR = "#e9caca"; // 接続断など (自発的でないオフライン)
+// オフライン種別 (report.py の offline_intervals が付ける): 0=不明, 1=手動, 2=接続断など
+const OFF_KIND_LABEL = {
+  0: "オフライン (種別不明)",
+  1: "手動でオフライン",
+  2: "オフライン (接続断など)",
+};
+const escapeHtml = (s) =>
+  s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 // 実行ノードが取れないビルド (Pipeline など builtOn がないもの) は
 // このタブでは表示しない
 const ALL_NODE_ROWS = [...DATA.nodes];
@@ -1345,10 +1355,12 @@ function computeNodeView(dayStart, dayEnd) {
     const executors = DATA.node_executors[i];
     const busy = runs.reduce((a, x) => a + (x.e - x.s), 0);
     const deleted = !!DATA.node_deleted[i];
-    // その日のオフライン帯 (行を出すかの判定にも使う)
+    // その日のオフライン帯 (行を出すかの判定にも使う)。
+    // 区間は [開始, 終了, 種別, 理由] (種別 0 + 理由なしは末尾が省略されている)
     const off = (DATA.node_offline[i] || [])
-      .map(([s, e]) => [Math.max(s, dayStart), Math.min(e, dayEnd)])
-      .filter(([s, e]) => e > s);
+      .map(([s, e, kind = 0, reason = ""]) =>
+        ({ s: Math.max(s, dayStart), e: Math.min(e, dayEnd), kind, reason }))
+      .filter((o) => o.e > o.s);
     return {
       name,
       orig: i, // DATA.node_offline の index
@@ -1380,8 +1392,10 @@ function computeNodeView(dayStart, dayEnd) {
   const stats = {};
   let maxLanes = 1;
   items.forEach((it, row) => {
-    // オフライン帯を先に入れてビルド帯を上に描く
-    for (const [s, e] of it.off) segs.push({ row, s, e, kind: "off" });
+    // オフライン帯を先に入れてビルド帯を上に描く (z2 でも run を手前にしている)
+    for (const o of it.off) {
+      segs.push({ row, s: o.s, e: o.e, kind: "off", offKind: o.kind, reason: o.reason });
+    }
     const lanes = assignLanes(it.runs);
     it.runs.forEach((seg) => { seg.row = row; seg.lanes = lanes; });
     segs.push(...it.runs);
@@ -1405,8 +1419,11 @@ function nodeOption(dayStart, axisEnd) {
         if (!d) return "";
         const mins = ((d.e - d.s) / 60000).toFixed(1);
         if (d.kind === "off") {
-          return `<b>${currentNodeRows[d.row]}</b><br>オフライン (収集間隔の粒度)<br>` +
-            `${fmtTime(d.s)} 〜 ${fmtTime(d.e)} (${mins} 分)`;
+          const reason = d.reason
+            ? `<br><span style="color:#90a4ae">理由: ${escapeHtml(d.reason)}</span>` : "";
+          return `<b>${currentNodeRows[d.row]}</b><br>` +
+            `${OFF_KIND_LABEL[d.offKind] || OFF_KIND_LABEL[0]} (収集間隔の粒度)<br>` +
+            `${fmtTime(d.s)} 〜 ${fmtTime(d.e)} (${mins} 分)${reason}`;
         }
         return `<b>${DATA.jobs[d.oji]}</b> ビルド #${d.number}<br>${d.res}<br>` +
           `${fmtTime(d.s)} 〜 ${fmtTime(d.e)} (${mins} 分)<br>` +
@@ -1489,7 +1506,11 @@ function nodeOption(dayStart, axisEnd) {
           shape: rect,
           // ビルド帯は常にオフライン帯より手前に描く (重なってもホバーはビルド優先)
           z2: d.kind === "off" ? 0 : 10,
-          style: { fill: d.kind === "off" ? OFFLINE_COLOR : DARK_COLORS[d.res] || "#90a4ae" },
+          style: {
+            fill: d.kind === "off"
+              ? (d.offKind === 2 ? OFFLINE_DISC_COLOR : OFFLINE_COLOR)
+              : DARK_COLORS[d.res] || "#90a4ae",
+          },
         };
       },
     }],

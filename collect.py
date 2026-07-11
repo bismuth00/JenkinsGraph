@@ -38,7 +38,9 @@ CREATE TABLE IF NOT EXISTS nodes (
 CREATE TABLE IF NOT EXISTS node_status (
     sampled_at INTEGER NOT NULL,           -- サンプリング時刻 (エポックミリ秒)
     node_name  TEXT NOT NULL,
-    offline    INTEGER NOT NULL
+    offline    INTEGER NOT NULL,
+    temp_offline   INTEGER,               -- オフライン時: 1 = 手動 (temporarilyOffline)、0 = 接続断など。NULL = 不明/オンライン
+    offline_reason TEXT                    -- オフライン理由 (offlineCauseReason)。オンライン時は NULL
 );
 """
 
@@ -60,6 +62,10 @@ def migrate(conn):
         conn.execute("ALTER TABLE jobs ADD COLUMN url TEXT NOT NULL DEFAULT ''")
     if job_cols and "concurrent" not in job_cols:
         conn.execute("ALTER TABLE jobs ADD COLUMN concurrent INTEGER")
+    ns_cols = {r[1] for r in conn.execute("PRAGMA table_info(node_status)")}
+    if ns_cols and "temp_offline" not in ns_cols:
+        conn.execute("ALTER TABLE node_status ADD COLUMN temp_offline INTEGER")
+        conn.execute("ALTER TABLE node_status ADD COLUMN offline_reason TEXT")
 
 # _class にこれらを含むものはジョブではなくコンテナとして再帰的にたどる
 CONTAINER_CLASS_KEYWORDS = ("Folder", "MultiBranchProject", "OrganizationFolder")
@@ -141,10 +147,15 @@ def fetch_new_builds(session, job_url, since_number):
 
 
 def sample_nodes(session, base_url, conn):
-    """ノード一覧とオンライン/オフライン状態を記録する (実行のたびに 1 サンプル)。"""
+    """ノード一覧とオンライン/オフライン状態を記録する (実行のたびに 1 サンプル)。
+
+    オフラインの場合は種別 (temporarilyOffline: 手動でオフラインにしたか) と
+    理由 (offlineCauseReason: 手動時のメッセージや接続断の説明) も記録する。
+    """
     res = session.get(
         base_url.rstrip("/") + "/computer/api/json",
-        params={"tree": "computer[displayName,offline,numExecutors]"},
+        params={"tree": "computer[displayName,offline,temporarilyOffline,"
+                        "offlineCauseReason,numExecutors]"},
         timeout=30,
     )
     res.raise_for_status()
@@ -158,9 +169,12 @@ def sample_nodes(session, base_url, conn):
             " ON CONFLICT(node_name) DO UPDATE SET executors = excluded.executors",
             (name, c.get("numExecutors", 1)),
         )
+        offline = 1 if c.get("offline") else 0
         conn.execute(
-            "INSERT INTO node_status VALUES (?, ?, ?)",
-            (now_ms, name, 1 if c.get("offline") else 0),
+            "INSERT INTO node_status VALUES (?, ?, ?, ?, ?)",
+            (now_ms, name, offline,
+             (1 if c.get("temporarilyOffline") else 0) if offline else None,
+             (c.get("offlineCauseReason") or None) if offline else None),
         )
     conn.commit()
 
