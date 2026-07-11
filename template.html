@@ -995,23 +995,45 @@ detailDate.value = MAX_DATE;
 let detailChart = null; // タブを開いたときに初期化 (非表示中は幅が取れないため)
 let currentDetail = [];
 let detailStats = {}; // ジョブ名 -> その日の時間内訳とビルド数
+// 詳細タイムラインの表示ジョブ (viewIdx/viewJobs と同じ内容だが並び順が異なりうる)
+let detailIdx = [];
+let detailJobs = [];
+
+// 詳細タイムラインの表示ジョブと並び順を決める。基本は共通の表示ジョブ
+// (検索・絞り込み・並び順) をそのまま使うが、「失敗率ワースト順」のときは
+// 選択中の表示期間ではなく「表示中の日」の時間ベース失敗率で並べ直す
+// (日単位のタブでは期間よりその日の状況で見たいため)
+function computeDetailView(dayStart) {
+  detailIdx = [...viewIdx];
+  detailJobs = [...viewJobs];
+  if (document.getElementById("job-sort").value !== "fail") return;
+  const rate = viewIdx.map((oji) => {
+    const { failMs, knownMs } = dailyFailTime(DATA.builds[oji], dayStart, 1, DATA.disabled[oji]);
+    return knownMs[0] ? failMs[0] / knownMs[0] : -1;
+  });
+  const order = viewIdx.map((_, i) => i).sort(
+    (a, b) => rate[b] - rate[a] || viewJobs[a].localeCompare(viewJobs[b])
+  );
+  detailIdx = order.map((i) => viewIdx[i]);
+  detailJobs = order.map((i) => viewJobs[i]);
+}
 
 // その日の時間内訳 (状態別の待機 / 実行 / キュー待ち) とビルド回数・結果数を集計する
 function computeDetailStats(dayStart, dayEnd) {
   const stats = {};
-  viewJobs.forEach((job) => {
+  detailJobs.forEach((job) => {
     stats[job] = { idle: {}, run: 0, queue: 0, known: 0, builds: 0, counts: {} };
   });
   for (const [vi, s, e, res, kind] of currentDetail) {
-    const st = stats[viewJobs[vi]];
+    const st = stats[detailJobs[vi]];
     const ms = e - s;
     st.known += ms;
     if (kind === "run") st.run += ms;
     else if (kind === "queue") st.queue += ms;
     else st.idle[res] = (st.idle[res] || 0) + ms;
   }
-  viewIdx.forEach((oji, vi) => {
-    const st = stats[viewJobs[vi]];
+  detailIdx.forEach((oji, vi) => {
+    const st = stats[detailJobs[vi]];
     // ジョブ設定の並列実行の可否 (バッジ表示用)。古い DB では常に 0
     st.concurrent = DATA.concurrent ? DATA.concurrent[oji] : 0;
     for (const [ts, code] of DATA.builds[oji]) {
@@ -1040,7 +1062,7 @@ function computeDetailStats(dayStart, dayEnd) {
 function computeDetailSegments(dayStart, dayEnd) {
   const segs = [];
   let maxLanes = 1;
-  viewIdx.forEach((oji, vi) => {
+  detailIdx.forEach((oji, vi) => {
     const builds = DATA.builds[oji];
     const disabled = DATA.disabled[oji];
     // その日に見えるビルドを重なりの塊ごとにサブレーンへ割り当てる
@@ -1104,12 +1126,12 @@ function detailOption(dayStart, axisEnd) {
         const label = d[4] === "run" ? `ビルド実行中 (${d[3]})`
           : d[4] === "queue" ? `キュー待機 (この後のビルド: ${d[3]})`
           : `状態: ${d[3]} (直前のビルドの結果)`;
-        return `<b>${viewJobs[d[0]]}</b> ビルド #${d[5]}<br>${label}<br>` +
+        return `<b>${detailJobs[d[0]]}</b> ビルド #${d[5]}<br>${label}<br>` +
           `${fmtTime(d[1])} 〜 ${fmtTime(d[2])} (${mins} 分)<br>` +
           `<span style="color:#90a4ae">クリックでビルドページを開く</span>`;
       },
     },
-    dataZoom: rowScroll(viewJobs.length, "detail-scroll-note"),
+    dataZoom: rowScroll(detailJobs.length, "detail-scroll-note"),
     grid: { left: gridLeft, right: 30, top: 20, bottom: 40 },
     xAxis: {
       type: "time",
@@ -1121,7 +1143,7 @@ function detailOption(dayStart, axisEnd) {
     },
     yAxis: {
       type: "category",
-      data: viewJobs,
+      data: detailJobs,
       inverse: true,
       triggerEvent: true, // ラベルクリックでジョブページを開く
       axisLabel: {
@@ -1222,6 +1244,7 @@ function renderDetail() {
 
   const dayStart = parseDate(detailDate.value);
   const axisEnd = dayStart + DAY_MS;
+  computeDetailView(dayStart);
   const view = computeDetailSegments(dayStart, Math.min(axisEnd, DATA.now));
   // 行の高さはラベル 3 行分 (56px) を下限に、並行ビルドのサブレーン分を
   // 8 レーンまで広げる。9 レーン以上は 8 レーン分の高さの中で細く分割する
@@ -1229,7 +1252,7 @@ function renderDetail() {
   // resize は旧データのまま先に行う (currentDetail 差し替え後だと旧系列の
   // 再描画が新配列を範囲外参照してしまう)
   const rowH = Math.max(56, Math.min(view.maxLanes, 8) * 24 + 16);
-  detailEl.style.height = Math.min(viewJobs.length, SCROLL_ROWS) * rowH + 100 + "px";
+  detailEl.style.height = Math.min(detailJobs.length, SCROLL_ROWS) * rowH + 100 + "px";
   detailChart.resize();
   currentDetail = view.segs;
   detailStats = computeDetailStats(dayStart, axisEnd);
@@ -1802,7 +1825,7 @@ function showTab(name) {
       detailChart.on("click", (p) => {
         if (p.componentType === "yAxis") return openJobPage(p.value);
         const d = currentDetail[p.dataIndex];
-        if (d && p.componentType === "series") openBuildPage(viewIdx[d[0]], d[5]);
+        if (d && p.componentType === "series") openBuildPage(detailIdx[d[0]], d[5]);
       });
     }
     renderDetail();
