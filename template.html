@@ -1031,6 +1031,9 @@ function computeDetailStats(dayStart, dayEnd) {
 // 最初のビルドより前は状態不明なので描かない。
 // 同一ジョブの並行ビルドは、キュー待ち + 実行を 1 ユニットとして行内の
 // サブレーンに割り当てて縦に積む (パイプラインタブと同じ方式)。
+// レーンは「実際に重なっているビルドの塊 (クラスタ)」ごとに決めるので、
+// どのビルドとも重ならないビルドは 1 レーン扱いで行の中央に描かれる
+// (行のどこかに並行があっても、離れた場所のバーは中央のまま)。
 // idle はジョブ全体の状態なので行の中央に描く。
 function computeDetailSegments(dayStart, dayEnd) {
   const segs = [];
@@ -1038,7 +1041,7 @@ function computeDetailSegments(dayStart, dayEnd) {
   viewIdx.forEach((oji, vi) => {
     const builds = DATA.builds[oji];
     const disabled = DATA.disabled[oji];
-    // その日に見えるビルドをサブレーンに割り当てる
+    // その日に見えるビルドを重なりの塊ごとにサブレーンへ割り当てる
     const units = [];
     builds.forEach((b, i) => {
       const [ts, , dur = 0, queuing = 0] = b;
@@ -1046,17 +1049,31 @@ function computeDetailSegments(dayStart, dayEnd) {
       const e = Math.min(ts + dur, dayEnd);
       if (e > s) units.push({ s, e, i });
     });
-    const lanes = assignLanes(units);
-    maxLanes = Math.max(maxLanes, lanes);
-    const laneOf = new Map(units.map((u) => [u.i, u.lane]));
-    const push = (s, e, code, kind, number, lane) => {
+    units.sort((a, b) => a.s - b.s);
+    const laneOf = new Map(); // ビルド idx -> { lane, lanes (クラスタ内のレーン数) }
+    let cluster = [];
+    let clusterEnd = -Infinity;
+    const flushCluster = () => {
+      if (!cluster.length) return;
+      const lanes = assignLanes(cluster);
+      maxLanes = Math.max(maxLanes, lanes);
+      for (const u of cluster) laneOf.set(u.i, { lane: u.lane, lanes });
+      cluster = [];
+    };
+    for (const u of units) {
+      if (u.s >= clusterEnd) flushCluster(); // どれとも重ならない → 新しい塊
+      cluster.push(u);
+      clusterEnd = Math.max(clusterEnd, u.e);
+    }
+    flushCluster();
+    const push = (s, e, code, kind, number, li) => {
       s = Math.max(s, dayStart);
       e = Math.min(e, dayEnd);
-      if (e > s) segs.push([vi, s, e, DATA.results[code], kind, number, lane ?? 0, lanes]);
+      if (e > s) segs.push([vi, s, e, DATA.results[code], kind, number, li.lane, li.lanes]);
     };
     builds.forEach((b, i) => {
       const [ts, code, dur = 0, queuing = 0, number] = b;
-      const lane = laneOf.get(i);
+      const lane = laneOf.get(i) || { lane: 0, lanes: 1 };
       if (queuing > 0) push(ts - queuing, ts, code, "queue", number, lane);
       push(ts, ts + dur, code, "run", number, lane);
       if (b[6]) return; // 次のビルドと番号が連続していない = 間は状態不明
