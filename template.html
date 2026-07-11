@@ -866,10 +866,9 @@ function renderBoxChart(vi, dates) {
   const queueData = queueByDay.map((v) => (v.length ? boxStats(v) : EMPTY));
 
   const el = document.createElement("div");
-  el.style.height = "620px";
+  el.style.height = "420px";
   boxesEl.append(el);
   const chart = echarts.init(el);
-  const axisTime = { formatter: (v) => fmtDurMs(v) };
   chart.setOption({
     animation: false,
     tooltip: {
@@ -883,27 +882,19 @@ function renderBoxChart(vi, dates) {
           `最大 ${f(4)}<br>Q3 ${f(3)}<br>中央値 ${f(2)}<br>Q1 ${f(1)}<br>最小 ${f(0)}`;
       },
     },
-    // 処理時間と待機時間はスケールが違う (秒〜数十分) ので上下 2 段に分ける
-    grid: [
-      { left: 90, right: 30, top: 30, height: 220 },
-      { left: 90, right: 30, top: 320, height: 220 },
-    ],
-    xAxis: [
-      { type: "category", gridIndex: 0, data: dates, axisLabel: { show: false } },
-      { type: "category", gridIndex: 1, data: dates, axisLabel: { rotate: 45 } },
-    ],
-    yAxis: [
-      { type: "value", gridIndex: 0, name: "処理時間", axisLabel: axisTime, min: 0 },
-      { type: "value", gridIndex: 1, name: "待機時間", axisLabel: axisTime, min: 0 },
-    ],
+    legend: { top: 4 },
+    // 処理時間と待機時間を同じ日付カテゴリに横並びで描く
+    grid: { left: 90, right: 30, top: 36, bottom: 70 },
+    xAxis: { type: "category", data: dates, axisLabel: { rotate: 45 } },
+    yAxis: { type: "value", min: 0, axisLabel: { formatter: (v) => fmtDurMs(v) } },
     series: [
       {
-        name: "処理時間", type: "boxplot", xAxisIndex: 0, yAxisIndex: 0, data: durData,
+        name: "処理時間", type: "boxplot", data: durData,
         itemStyle: { color: "#e8eaf6", borderColor: "#3949ab" },
       },
       {
         // キュー待ちの帯と同系の黄色 (枠はラベルと同じ暗めのトーン)
-        name: "待機時間", type: "boxplot", xAxisIndex: 1, yAxisIndex: 1, data: queueData,
+        name: "待機時間", type: "boxplot", data: queueData,
         itemStyle: { color: "#fff9c4", borderColor: "#9c7a00" },
       },
     ],
