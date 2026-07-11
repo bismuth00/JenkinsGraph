@@ -1237,7 +1237,8 @@ function detailOption(dayStart, axisEnd) {
 }
 
 function renderDetail() {
-  if (!detailChart) return;
+  // 非表示中は再計算しない (タブを開いたときに showTab が呼び直す)
+  if (!detailChart || document.getElementById("view-detail").style.display === "none") return;
   if (!detailDate.value || detailDate.value < MIN_DATE) detailDate.value = MIN_DATE;
   if (detailDate.value > MAX_DATE) detailDate.value = MAX_DATE;
   document.getElementById("prev-day").disabled = detailDate.value <= MIN_DATE;
@@ -1315,6 +1316,14 @@ function assignLanes(segs) {
   return Math.max(laneEnds.length, 1);
 }
 
+// 日付範囲の二分探索用: ジョブごとの「先頭から i 番目までのビルドで最も遅い
+// 実行終了時刻 (ts+dur)」。単調非減少なので、この値が dayStart を超える最初の
+// ビルドから走査を始めれば、それより前のビルドはその日に重ならない
+const MAX_END = DATA.builds.map((list) => {
+  let m = 0;
+  return list.map((b) => (m = Math.max(m, b[0] + (b[2] || 0))));
+});
+
 function computeNodeView(dayStart, dayEnd) {
   // ノードタブはジョブの絞り込みの影響を受けず、全ジョブのビルドを表示する。
   // 絞り込み・並び替えはノード専用のコントロール (#node-search / #node-sort)。
@@ -1325,8 +1334,21 @@ function computeNodeView(dayStart, dayEnd) {
   const runsByRow = ALL_NODE_ROWS.map(() => []);
   DATA.jobs.forEach((job, oji) => {
     if (!NODE_MASK[oji]) return; // [report.node] の表示対象のみ
-    for (const b of DATA.builds[oji]) {
+    const builds = DATA.builds[oji];
+    const ends = MAX_END[oji];
+    // その日に重なりうる範囲だけを走査する (全期間の全ビルド走査を避ける)。
+    // 開始 = 実行終了の最大値が dayStart を超える最初のビルド (二分探索)、
+    // 終了 = 開始時刻 (ts は昇順) が dayEnd 以降になったら打ち切り
+    let lo = 0, hi = builds.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (ends[mid] > dayStart) hi = mid;
+      else lo = mid + 1;
+    }
+    for (let i = lo; i < builds.length; i++) {
+      const b = builds[i];
       const [ts, code, dur = 0, , number] = b;
+      if (ts >= dayEnd) break;
       const nidx = b[5] ?? -1;
       if (nidx < 0) continue; // 実行ノード不明のビルドは表示しない
       const s = Math.max(ts, dayStart);
@@ -1518,7 +1540,8 @@ function nodeOption(dayStart, axisEnd) {
 }
 
 function renderNode() {
-  if (!nodeChart) return;
+  // 非表示中は再計算しない (タブを開いたときに showTab が呼び直す)
+  if (!nodeChart || document.getElementById("view-node").style.display === "none") return;
   if (!detailDate.value || detailDate.value < MIN_DATE) detailDate.value = MIN_DATE;
   if (detailDate.value > MAX_DATE) detailDate.value = MAX_DATE;
   const dayStart = parseDate(detailDate.value);
