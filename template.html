@@ -595,6 +595,14 @@ function openJobPage(name) {
   const url = DATA.job_urls[jobs.indexOf(name)];
   if (url) window.open(url, "_blank", "noopener");
 }
+// ラベル (式) のページを新しいタブで開く。Jenkins は式のままの URL
+// (/label/linux&&docker/ など) で該当ノード・ジョブの一覧を表示する
+function openLabelPage(expr) {
+  window.open(
+    DATA.jenkins_url + "/label/" + encodeURIComponent(expr) + "/",
+    "_blank", "noopener"
+  );
+}
 tl.on("click", (p) => {
   if (p.componentType === "yAxis") return openJobPage(p.value);
   const d = currentSpans[p.dataIndex];
@@ -1925,7 +1933,18 @@ function showTab(name) {
     if (!detailChart) {
       detailChart = echarts.init(detailEl);
       detailChart.on("click", (p) => {
-        if (p.componentType === "yAxis") return openJobPage(p.value);
+        if (p.componentType === "yAxis") {
+          // リッチテキストのクリック対象は行 (チャンク) ごとの tspan なので、
+          // そのテキストで分岐する: 属性行の「ラベル ...」の部分は
+          // ラベルのページ、それ以外 (ジョブ名など) はジョブページ
+          const st = detailStats[p.value];
+          const chunk = p.event && p.event.target
+            && p.event.target.style && p.event.target.style.text;
+          if (st && st.label && typeof chunk === "string" && chunk.startsWith("ラベル ")) {
+            return openLabelPage(st.label);
+          }
+          return openJobPage(p.value);
+        }
         const d = currentDetail[p.dataIndex];
         if (d && p.componentType === "series") openBuildPage(detailIdx[d[0]], d[5]);
       });
