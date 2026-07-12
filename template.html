@@ -1063,7 +1063,9 @@ function computeDetailStats(dayStart, dayEnd) {
     const st = stats[detailJobs[vi]];
     // ジョブ設定の並列実行の可否 (バッジ表示用)。古い DB では常に 0
     st.concurrent = DATA.concurrent ? DATA.concurrent[oji] : 0;
-    // ラベル式から求めたビルド可能な現存ノード数 (null = ラベルなし/不明)
+    // 実行先の制限ラベル式と、そこから求めたビルド可能な現存ノード数
+    // (label = null はラベルなし/不明、labelNodes = null は判定不能)
+    st.label = DATA.job_labels ? DATA.job_labels[oji] : null;
     st.labelNodes = DATA.label_nodes ? DATA.label_nodes[oji] : null;
     for (const [ts, code] of DATA.builds[oji]) {
       if (ts < dayStart || ts >= dayEnd) continue;
@@ -1180,15 +1182,19 @@ function detailOption(dayStart, axisEnd) {
         formatter: (job) => {
           const name = job;
           const s = detailStats[job];
-          // ジョブ設定で並列実行が可能なジョブはバッジで示す
-          let tag = s && s.concurrent ? "{par| [並列可]}" : "";
-          // ラベル式のあるジョブは「ビルド可能な現存ノード数」を示す
-          // (0 台 = ラベルに合うノードがない異常を赤で目立たせる)
-          if (s && s.labelNodes != null) {
-            tag += s.labelNodes
-              ? `{nd| [実行可ノード${s.labelNodes}]}`
-              : "{nd0| [実行可ノード0]}";
+          // ジョブ名の下の属性行: 並列実行の可否と、実行先の制限ラベル +
+          // ビルド可能な現存ノード数 (0 台 = ラベルに合うノードがない異常を
+          // 赤で目立たせる)。どちらもないジョブは行ごと省略する
+          const attrs = [];
+          if (s && s.concurrent) attrs.push("{par|並列可}");
+          if (s && s.label) {
+            const expr = s.label.replace(/[{}]/g, " "); // rich text の構文と衝突する文字は除く
+            const text = s.labelNodes == null
+              ? `ラベル ${expr}`
+              : `ラベル ${expr} (実行可ノード${s.labelNodes})`;
+            attrs.push(`{${s.labelNodes === 0 ? "nd0" : "nd"}|${text}}`);
           }
+          const tag = attrs.length ? "\n" + attrs.join("{sep| }") : "";
           if (!s || !s.known) return `{name|${name}}${tag}\n{dim|データなし}`;
           // 1 行目: 時間内訳 (状態別の待機 / 実行 / キュー待ち)。色はチャートと対応
           const pct = (ms) => Math.round((ms / s.known) * 100);
@@ -1285,12 +1291,15 @@ function renderDetail() {
   const axisEnd = dayStart + DAY_MS;
   computeDetailView(dayStart);
   const view = computeDetailSegments(dayStart, Math.min(axisEnd, DATA.now));
-  // 行の高さはラベル 3 行分 (56px) を下限に、並行ビルドのサブレーン分を
+  // 行の高さはラベルの行数分 (通常 3 行 = 56px、並列可/ラベルの属性行が
+  // 出るジョブがあれば 4 行 = 70px) を下限に、並行ビルドのサブレーン分を
   // 8 レーンまで広げる。9 レーン以上は 8 レーン分の高さの中で細く分割する
   // (renderItem 側の laneH 計算が行の高さに合わせて縮む)。
   // resize は旧データのまま先に行う (currentDetail 差し替え後だと旧系列の
   // 再描画が新配列を範囲外参照してしまう)
-  const rowH = Math.max(56, Math.min(view.maxLanes, 8) * 24 + 16);
+  const hasAttr = detailIdx.some((oji) =>
+    (DATA.concurrent && DATA.concurrent[oji]) || (DATA.job_labels && DATA.job_labels[oji]));
+  const rowH = Math.max(hasAttr ? 70 : 56, Math.min(view.maxLanes, 8) * 24 + 16);
   detailEl.style.height = Math.min(detailJobs.length, SCROLL_ROWS) * rowH + 100 + "px";
   detailChart.resize();
   currentDetail = view.segs;

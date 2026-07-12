@@ -373,6 +373,7 @@ def main():
         "label_nodes": [
             eligible_nodes(job_labels[j]) if job_labels.get(j) else None for j in jobs
         ],
+        "job_labels": [job_labels.get(j) for j in jobs],
         "job_urls": [job_url(cfg["jenkins"]["url"], j, urls) for j in jobs],
         "jenkins_url": cfg["jenkins"]["url"].rstrip("/"),
         "show_trend": bool(cfg["report"].get("show_trend", True)),
