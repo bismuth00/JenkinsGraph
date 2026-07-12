@@ -12,6 +12,7 @@ import argparse
 import base64
 import gzip
 import json
+import re
 import sqlite3
 import tomllib
 from collections import defaultdict
@@ -42,38 +43,50 @@ def load_builds(db_path):
 
 def load_jobs_meta(db_path):
     """jobs テーブルから (無効ジョブ名の集合, ジョブ名 -> URL,
-    ジョブ名 -> 並列実行可否) を返す。並列実行可否は 1/0/None (不明)。
+    ジョブ名 -> 並列実行可否, ジョブ名 -> ラベル式) を返す。
+    並列実行可否は 1/0/None (不明)、ラベル式は文字列/None (制限なし/不明)。
 
     テーブルやカラムがない古い DB では空を返す (URL は呼び出し側で組み立てる)。
     """
     conn = sqlite3.connect(db_path)
     tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     if "jobs" not in tables:
-        return set(), {}, {}
+        return set(), {}, {}, {}
     cols = {r[1] for r in conn.execute("PRAGMA table_info(jobs)")}
     url_col = "url" if "url" in cols else "''"
     concurrent_col = "concurrent" if "concurrent" in cols else "NULL"
+    label_col = "label" if "label" in cols else "NULL"
     disabled = set()
     urls = {}
     concurrent = {}
-    for name, buildable, url, conc in conn.execute(
-        f"SELECT job_name, buildable, {url_col}, {concurrent_col} FROM jobs"
+    labels = {}
+    for name, buildable, url, conc, label in conn.execute(
+        f"SELECT job_name, buildable, {url_col}, {concurrent_col}, {label_col} FROM jobs"
     ):
         if not buildable:
             disabled.add(name)
         if url:
             urls[name] = url
         concurrent[name] = conc
-    return disabled, urls, concurrent
+        labels[name] = label
+    return disabled, urls, concurrent, labels
 
 
 def load_nodes(db_path):
-    """(ノード名 -> エグゼキュータ数, node_status サンプル) を返す。古い DB では空。"""
+    """(ノード名 -> エグゼキュータ数, node_status サンプル,
+    ノード名 -> ラベル文字列) を返す。古い DB では空。"""
     conn = sqlite3.connect(db_path)
     tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     executors = {}
+    node_labels = {}
     if "nodes" in tables:
-        executors = dict(conn.execute("SELECT node_name, executors FROM nodes"))
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(nodes)")}
+        labels_col = "labels" if "labels" in cols else "NULL"
+        for name, execs, labels in conn.execute(
+            f"SELECT node_name, executors, {labels_col} FROM nodes"
+        ):
+            executors[name] = execs
+            node_labels[name] = labels
     samples = []
     if "node_status" in tables:
         # temp_offline / offline_reason は後から追加されたカラム。古い DB では NULL 扱い
@@ -84,7 +97,7 @@ def load_nodes(db_path):
             f"SELECT sampled_at, node_name, offline, {temp}, {reason} FROM node_status"
             " ORDER BY node_name, sampled_at"
         ).fetchall()
-    return executors, samples
+    return executors, samples, node_labels
 
 
 def offline_intervals(samples, node_index, window_start_ms, now_ms, current):
@@ -135,6 +148,61 @@ def offline_intervals(samples, node_index, window_start_ms, now_ms, current):
     for lst in intervals:
         lst[:] = [iv for iv in lst if iv[1] > window_start_ms]
     return intervals
+
+
+def eval_label_expr(expr, labels):
+    """Jenkins のラベル式をノードのラベル集合に対して評価する。
+
+    対応する構文はラベル名・!・&&・||・括弧。それ以外 (->, <->, 引用符
+    など、実運用ではまれ) が含まれる式は None (判定不能) を返す。
+    """
+    tokens = re.findall(r"\(|\)|&&|\|\||!|[^\s()!&|]+", expr)
+    if "".join(tokens) != "".join(expr.split()):
+        return None  # トークン化で落ちた文字がある = 対応外の構文
+
+    pos = 0
+
+    def parse_or():
+        nonlocal pos
+        v = parse_and()
+        while v is not None and pos < len(tokens) and tokens[pos] == "||":
+            pos += 1
+            r = parse_and()
+            v = None if r is None else (v or r)
+        return v
+
+    def parse_and():
+        nonlocal pos
+        v = parse_atom()
+        while v is not None and pos < len(tokens) and tokens[pos] == "&&":
+            pos += 1
+            r = parse_atom()
+            v = None if r is None else (v and r)
+        return v
+
+    def parse_atom():
+        nonlocal pos
+        if pos >= len(tokens):
+            return None
+        t = tokens[pos]
+        if t == "!":
+            pos += 1
+            v = parse_atom()
+            return None if v is None else (not v)
+        if t == "(":
+            pos += 1
+            v = parse_or()
+            if v is None or pos >= len(tokens) or tokens[pos] != ")":
+                return None
+            pos += 1
+            return v
+        if t in ("&&", "||", ")"):
+            return None
+        pos += 1
+        return t in labels
+
+    v = parse_or()
+    return v if pos == len(tokens) else None
 
 
 def job_url(base_url, name, urls):
@@ -249,7 +317,7 @@ def main():
             if tl_filter(j) or node_filter(j) or pipe_filter(j)]
 
     # ノード一覧: nodes テーブルとビルドの実行ノードの和集合 ('' はビルトインノード)
-    executors, node_samples = load_nodes(cfg["db"]["path"])
+    executors, node_samples, node_labels = load_nodes(cfg["db"]["path"])
     node_names = sorted({r[6] for r in rows if r[6] is not None} | set(executors))
     node_index = {n: i for i, n in enumerate(node_names)}
 
@@ -262,7 +330,28 @@ def main():
         current_nodes = set(node_names)
 
     builds, results = encode_builds(rows, jobs, node_index, window_start_ms)
-    disabled, urls, concurrent = load_jobs_meta(cfg["db"]["path"])
+    disabled, urls, concurrent, job_labels = load_jobs_meta(cfg["db"]["path"])
+
+    # ジョブのラベル式を現存ノードのラベルに対して評価し、
+    # 「ビルド可能なノード数」を求める。ラベル式のないジョブ
+    # (制限なし、または Pipeline などで不明) は None = 表示しない。
+    # ノード自身の名前もラベルとして扱う (Jenkins のセルフラベル)
+    node_label_sets = {
+        n: set((node_labels.get(n) or "").split()) | ({n} if n else set())
+        for n in node_names
+    }
+
+    def eligible_nodes(expr):
+        count = 0
+        for n in node_names:
+            if n not in current_nodes:
+                continue
+            v = eval_label_expr(expr, node_label_sets[n])
+            if v is None:
+                return None  # 対応外の構文は判定不能
+            if v:
+                count += 1
+        return count
 
     # ノードタブの「対象ジョブのみ実行 / 未実行」ノード数の対象パターン
     free_patterns = list(cfg["report"].get("node_free_jobs", []))
@@ -281,6 +370,9 @@ def main():
         "fail_results": FAIL_RESULTS,
         "disabled": [1 if j in disabled else 0 for j in jobs],
         "concurrent": [1 if concurrent.get(j) else 0 for j in jobs],
+        "label_nodes": [
+            eligible_nodes(job_labels[j]) if job_labels.get(j) else None for j in jobs
+        ],
         "job_urls": [job_url(cfg["jenkins"]["url"], j, urls) for j in jobs],
         "jenkins_url": cfg["jenkins"]["url"].rstrip("/"),
         "show_trend": bool(cfg["report"].get("show_trend", True)),

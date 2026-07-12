@@ -1063,6 +1063,8 @@ function computeDetailStats(dayStart, dayEnd) {
     const st = stats[detailJobs[vi]];
     // ジョブ設定の並列実行の可否 (バッジ表示用)。古い DB では常に 0
     st.concurrent = DATA.concurrent ? DATA.concurrent[oji] : 0;
+    // ラベル式から求めたビルド可能な現存ノード数 (null = ラベルなし/不明)
+    st.labelNodes = DATA.label_nodes ? DATA.label_nodes[oji] : null;
     for (const [ts, code] of DATA.builds[oji]) {
       if (ts < dayStart || ts >= dayEnd) continue;
       st.builds++;
@@ -1179,7 +1181,14 @@ function detailOption(dayStart, axisEnd) {
           const name = job;
           const s = detailStats[job];
           // ジョブ設定で並列実行が可能なジョブはバッジで示す
-          const tag = s && s.concurrent ? "{par| [並列可]}" : "";
+          let tag = s && s.concurrent ? "{par| [並列可]}" : "";
+          // ラベル式のあるジョブは「ビルド可能な現存ノード数」を示す
+          // (0 台 = ラベルに合うノードがない異常を赤で目立たせる)
+          if (s && s.labelNodes != null) {
+            tag += s.labelNodes
+              ? `{nd| [実行可ノード${s.labelNodes}]}`
+              : "{nd0| [実行可ノード0]}";
+          }
           if (!s || !s.known) return `{name|${name}}${tag}\n{dim|データなし}`;
           // 1 行目: 時間内訳 (状態別の待機 / 実行 / キュー待ち)。色はチャートと対応
           const pct = (ms) => Math.round((ms / s.known) * 100);
@@ -1204,6 +1213,8 @@ function detailOption(dayStart, axisEnd) {
         rich: {
           name: { align: "right", color: "#263238", lineHeight: 16 },
           par: { color: "#5e35b1", fontSize: 10, lineHeight: 16, fontWeight: "bold" },
+          nd: { color: "#1565c0", fontSize: 10, lineHeight: 16 },
+          nd0: { color: "#c62828", fontSize: 10, lineHeight: 16, fontWeight: "bold" },
           ok: { color: "#2e7d32", fontSize: 10, lineHeight: 13 },
           ng: { color: "#c62828", fontSize: 10, lineHeight: 13 },
           un: { color: "#ef6c00", fontSize: 10, lineHeight: 13 },

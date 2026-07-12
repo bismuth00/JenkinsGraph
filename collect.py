@@ -29,11 +29,13 @@ CREATE TABLE IF NOT EXISTS jobs (
     job_name   TEXT PRIMARY KEY,
     buildable  INTEGER NOT NULL DEFAULT 1,  -- 0 = Jenkins 上で無効化されている
     url        TEXT NOT NULL DEFAULT '',    -- ジョブページの URL (ビルドページはこれ + 番号)
-    concurrent INTEGER                      -- 1 = 並列実行可 (concurrentBuild)。NULL = 不明
+    concurrent INTEGER,                     -- 1 = 並列実行可 (concurrentBuild)。NULL = 不明
+    label      TEXT                         -- 実行先の制限ラベル式 (labelExpression)。NULL = 制限なし/不明
 );
 CREATE TABLE IF NOT EXISTS nodes (
     node_name TEXT PRIMARY KEY,            -- ビルトインノードは '' で記録
-    executors INTEGER NOT NULL DEFAULT 1
+    executors INTEGER NOT NULL DEFAULT 1,
+    labels    TEXT                          -- ノードのラベル (assignedLabels、空白区切り)
 );
 CREATE TABLE IF NOT EXISTS node_status (
     sampled_at INTEGER NOT NULL,           -- サンプリング時刻 (エポックミリ秒)
@@ -62,6 +64,11 @@ def migrate(conn):
         conn.execute("ALTER TABLE jobs ADD COLUMN url TEXT NOT NULL DEFAULT ''")
     if job_cols and "concurrent" not in job_cols:
         conn.execute("ALTER TABLE jobs ADD COLUMN concurrent INTEGER")
+    if job_cols and "label" not in job_cols:
+        conn.execute("ALTER TABLE jobs ADD COLUMN label TEXT")
+    node_cols = {r[1] for r in conn.execute("PRAGMA table_info(nodes)")}
+    if node_cols and "labels" not in node_cols:
+        conn.execute("ALTER TABLE nodes ADD COLUMN labels TEXT")
     ns_cols = {r[1] for r in conn.execute("PRAGMA table_info(node_status)")}
     if ns_cols and "temp_offline" not in ns_cols:
         conn.execute("ALTER TABLE node_status ADD COLUMN temp_offline INTEGER")
@@ -83,15 +90,16 @@ def load_config(path):
 
 def iter_jobs(session, root_url):
     """フォルダ・マルチブランチを再帰的にたどり、ビルドを持つジョブを
-    (fullName, url, buildable, concurrent) で列挙する。
+    (fullName, url, buildable, concurrent, label) で列挙する。
     buildable=False は無効化されたジョブ。concurrent は並列実行の可否
-    (concurrentBuild)。フィールドを返さないジョブ種別では None (不明)。"""
+    (concurrentBuild)、label は実行先の制限ラベル式 (labelExpression)。
+    フィールドを返さないジョブ種別 (Pipeline の label など) は None (不明)。"""
     stack = [root_url.rstrip("/") + "/"]
     while stack:
         url = stack.pop()
         res = session.get(
             url + "api/json",
-            params={"tree": "jobs[_class,fullName,url,buildable,concurrentBuild]"},
+            params={"tree": "jobs[_class,fullName,url,buildable,concurrentBuild,labelExpression]"},
             timeout=30,
         )
         res.raise_for_status()
@@ -102,7 +110,8 @@ def iter_jobs(session, root_url):
             else:
                 concurrent = job.get("concurrentBuild")
                 yield (job["fullName"], job["url"], job.get("buildable", True),
-                       None if concurrent is None else (1 if concurrent else 0))
+                       None if concurrent is None else (1 if concurrent else 0),
+                       job.get("labelExpression") or None)
 
 
 def fetch_new_builds(session, job_url, since_number):
@@ -155,7 +164,7 @@ def sample_nodes(session, base_url, conn):
     res = session.get(
         base_url.rstrip("/") + "/computer/api/json",
         params={"tree": "computer[displayName,offline,temporarilyOffline,"
-                        "offlineCauseReason,numExecutors]"},
+                        "offlineCauseReason,numExecutors,assignedLabels[name]]"},
         timeout=30,
     )
     res.raise_for_status()
@@ -164,10 +173,14 @@ def sample_nodes(session, base_url, conn):
         name = c.get("displayName", "")
         if name in ("Built-In Node", "master"):
             name = ""  # ビルドの builtOn ('') と揃える
+        labels = " ".join(
+            l["name"] for l in c.get("assignedLabels") or [] if l and l.get("name")
+        )
         conn.execute(
-            "INSERT INTO nodes (node_name, executors) VALUES (?, ?)"
-            " ON CONFLICT(node_name) DO UPDATE SET executors = excluded.executors",
-            (name, c.get("numExecutors", 1)),
+            "INSERT INTO nodes (node_name, executors, labels) VALUES (?, ?, ?)"
+            " ON CONFLICT(node_name) DO UPDATE SET"
+            " executors = excluded.executors, labels = excluded.labels",
+            (name, c.get("numExecutors", 1), labels or None),
         )
         offline = 1 if c.get("offline") else 0
         conn.execute(
@@ -196,15 +209,16 @@ def main():
 
     job_filter = compile_filter(cfg)
     total = 0
-    for name, url, buildable, concurrent in iter_jobs(session, cfg["jenkins"]["url"]):
+    for name, url, buildable, concurrent, label in iter_jobs(session, cfg["jenkins"]["url"]):
         if not job_filter(name):
             continue
         conn.execute(
-            "INSERT INTO jobs (job_name, buildable, url, concurrent) VALUES (?, ?, ?, ?)"
+            "INSERT INTO jobs (job_name, buildable, url, concurrent, label)"
+            " VALUES (?, ?, ?, ?, ?)"
             " ON CONFLICT(job_name) DO UPDATE SET"
             " buildable = excluded.buildable, url = excluded.url,"
-            " concurrent = excluded.concurrent",
-            (name, 1 if buildable else 0, url, concurrent),
+            " concurrent = excluded.concurrent, label = excluded.label",
+            (name, 1 if buildable else 0, url, concurrent, label),
         )
         since = conn.execute(
             "SELECT MAX(number) FROM builds WHERE job_name = ?", (name,)
