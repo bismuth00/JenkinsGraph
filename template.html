@@ -1317,6 +1317,15 @@ const OFF_KIND_LABEL = {
 };
 const escapeHtml = (s) =>
   s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+
+// ノードのページを開く (削除済みノードはページがもう存在しないので開かない)
+function openNodePage(name) {
+  if (DATA.node_deleted[DATA.nodes.indexOf(name)]) return;
+  window.open(
+    DATA.jenkins_url + "/computer/" + encodeURIComponent(name) + "/",
+    "_blank", "noopener"
+  );
+}
 // 実行ノードが取れないビルド (Pipeline など builtOn がないもの) は
 // このタブでは表示しない
 const ALL_NODE_ROWS = [...DATA.nodes];
@@ -1467,11 +1476,14 @@ function nodeOption(dayStart, axisEnd) {
         if (!d) return "";
         const mins = ((d.e - d.s) / 60000).toFixed(1);
         if (d.kind === "off") {
+          const name = currentNodeRows[d.row];
           const reason = d.reason
             ? `<br><span style="color:#90a4ae">理由: ${escapeHtml(d.reason)}</span>` : "";
-          return `<b>${currentNodeRows[d.row]}</b><br>` +
+          const hint = DATA.node_deleted[DATA.nodes.indexOf(name)]
+            ? "" : `<br><span style="color:#90a4ae">クリックでノードのページを開く</span>`;
+          return `<b>${name}</b><br>` +
             `${OFF_KIND_LABEL[d.offKind] || OFF_KIND_LABEL[0]} (収集間隔の粒度)<br>` +
-            `${fmtTime(d.s)} 〜 ${fmtTime(d.e)} (${mins} 分)${reason}`;
+            `${fmtTime(d.s)} 〜 ${fmtTime(d.e)} (${mins} 分)${reason}${hint}`;
         }
         return `<b>${DATA.jobs[d.oji]}</b> ビルド #${d.number}<br>${d.res}<br>` +
           `${fmtTime(d.s)} 〜 ${fmtTime(d.e)} (${mins} 分)<br>` +
@@ -1903,17 +1915,11 @@ function showTab(name) {
     if (!nodeChart) {
       nodeChart = echarts.init(nodeEl);
       nodeChart.on("click", (p) => {
-        if (p.componentType === "yAxis") {
-          // 削除済みノードのページはもう存在しないので開かない
-          if (DATA.node_deleted[DATA.nodes.indexOf(p.value)]) return;
-          window.open(
-            DATA.jenkins_url + "/computer/" + encodeURIComponent(p.value) + "/",
-            "_blank", "noopener"
-          );
-          return;
-        }
+        if (p.componentType === "yAxis") return openNodePage(p.value);
         const d = currentNodeSegs[p.dataIndex];
-        if (d && d.kind === "run" && p.componentType === "series") openBuildPage(d.oji, d.number);
+        if (!d || p.componentType !== "series") return;
+        if (d.kind === "run") openBuildPage(d.oji, d.number);
+        else if (d.kind === "off") openNodePage(currentNodeRows[d.row]);
       });
     }
     renderNode();
