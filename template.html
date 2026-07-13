@@ -1287,14 +1287,19 @@ function detailOption(dayStart, axisEnd) {
   };
 }
 
-function renderDetail() {
-  // 非表示中は再計算しない (タブを開いたときに showTab が呼び直す)
-  if (!detailChart || document.getElementById("view-detail").style.display === "none") return;
+// 日付入力の補正と前日/翌日ボタンの活性を更新する。どのタブが表示中でも
+// 日付が変わるたびに呼ぶ (詳細タイムラインの再計算スキップとは独立)
+function syncDayControls() {
   if (!detailDate.value || detailDate.value < MIN_DATE) detailDate.value = MIN_DATE;
   if (detailDate.value > MAX_DATE) detailDate.value = MAX_DATE;
   document.getElementById("prev-day").disabled = detailDate.value <= MIN_DATE;
   document.getElementById("next-day").disabled = detailDate.value >= MAX_DATE;
+}
 
+function renderDetail() {
+  syncDayControls();
+  // 非表示中は再計算しない (タブを開いたときに showTab が呼び直す)
+  if (!detailChart || document.getElementById("view-detail").style.display === "none") return;
   const dayStart = parseDate(detailDate.value);
   const axisEnd = dayStart + DAY_MS;
   computeDetailView(dayStart);
@@ -1606,10 +1611,9 @@ function nodeOption(dayStart, axisEnd) {
 }
 
 function renderNode() {
+  syncDayControls();
   // 非表示中は再計算しない (タブを開いたときに showTab が呼び直す)
   if (!nodeChart || document.getElementById("view-node").style.display === "none") return;
-  if (!detailDate.value || detailDate.value < MIN_DATE) detailDate.value = MIN_DATE;
-  if (detailDate.value > MAX_DATE) detailDate.value = MAX_DATE;
   const dayStart = parseDate(detailDate.value);
   const axisEnd = dayStart + DAY_MS;
   const view = computeNodeView(dayStart, Math.min(axisEnd, DATA.now));
@@ -1824,9 +1828,8 @@ function renderProfile({ root, items, span, queueSum }) {
 }
 
 function renderPipeline() {
+  syncDayControls();
   if (document.getElementById("view-pipeline").style.display === "none") return;
-  if (!detailDate.value || detailDate.value < MIN_DATE) detailDate.value = MIN_DATE;
-  if (detailDate.value > MAX_DATE) detailDate.value = MAX_DATE;
   const dayStart = parseDate(detailDate.value);
   const dayEnd = dayStart + DAY_MS;
 
