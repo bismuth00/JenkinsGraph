@@ -134,6 +134,13 @@
   <button id="prev-day">← 前日</button>
   <input type="date" id="detail-date">
   <button id="next-day">翌日 →</button>
+  <span id="zoom-controls" style="margin-left: 12px;">
+    倍率:
+    <button data-zoom="1" class="active">×1</button>
+    <button data-zoom="2">×2</button>
+    <button data-zoom="4">×4</button>
+    <span class="presets" id="zoom-note"></span>
+  </span>
 </div>
 
 <div id="view-detail" style="display: none;">
@@ -1012,6 +1019,38 @@ for (const d of [3, 7, 14, 30, 60, 90, 180, 365].filter((d) => d <= DATA.days)) 
 
 // ---- 詳細タイムライン (1 日単位、ビルド実行と待機状態) ----
 
+// 時間軸 (X 軸) の表示倍率。×2 なら 12 時間、×4 なら 6 時間の窓で表示し、
+// 拡大中はチャート上の横ドラッグで時間帯を移動する (詳細/ノード共通)
+let dayZoom = 1;
+
+function dayXZoom(dayStart) {
+  if (dayZoom <= 1) return [];
+  return [{
+    type: "inside",
+    xAxisIndex: 0,
+    startValue: dayStart,
+    endValue: dayStart + DAY_MS / dayZoom,
+    zoomOnMouseWheel: false,
+    moveOnMouseWheel: false,
+    moveOnMouseMove: true, // ドラッグで時間帯を移動
+    filterMode: "none", // custom series は dataIndex がずれると壊れるため間引かない
+  }];
+}
+
+const zoomEl = document.getElementById("zoom-controls");
+for (const b of zoomEl.querySelectorAll("button")) {
+  b.addEventListener("click", () => {
+    dayZoom = Number(b.dataset.zoom);
+    for (const x of zoomEl.querySelectorAll("button")) {
+      x.classList.toggle("active", x === b);
+    }
+    document.getElementById("zoom-note").textContent =
+      dayZoom > 1 ? "チャートの横ドラッグで時間帯を移動" : "";
+    renderDetail();
+    renderNode();
+  });
+}
+
 const detailEl = document.getElementById("detail");
 const detailDate = document.getElementById("detail-date");
 detailDate.min = MIN_DATE;
@@ -1171,7 +1210,7 @@ function detailOption(dayStart, axisEnd) {
           `<span style="color:#90a4ae">クリックでビルドページを開く</span>`;
       },
     },
-    dataZoom: rowScroll(detailJobs.length, "detail-scroll-note"),
+    dataZoom: [...rowScroll(detailJobs.length, "detail-scroll-note"), ...dayXZoom(dayStart)],
     grid: { left: gridLeft, right: 30, top: 20, bottom: 40 },
     xAxis: {
       type: "time",
@@ -1524,7 +1563,7 @@ function nodeOption(dayStart, axisEnd) {
           `<span style="color:#90a4ae">クリックでビルドページを開く</span>`;
       },
     },
-    dataZoom: rowScroll(currentNodeRows.length, "node-scroll-note"),
+    dataZoom: [...rowScroll(currentNodeRows.length, "node-scroll-note"), ...dayXZoom(dayStart)],
     grid: { left: 250, right: 30, top: 20, bottom: 40 },
     xAxis: {
       type: "time",
@@ -1915,6 +1954,9 @@ function showTab(name) {
   const daily = name === "detail" || name === "node" || name === "pipeline";
   document.getElementById("period-controls").style.display = daily ? "none" : "";
   document.getElementById("day-controls").style.display = daily ? "" : "none";
+  // 時間軸の倍率はタイムライン系の 2 タブのみ (パイプラインは経過時間軸)
+  document.getElementById("zoom-controls").style.display =
+    name === "detail" || name === "node" ? "" : "none";
   // ジョブの絞り込みはジョブ単位のタブ、ノードの絞り込みはノードタブにだけ表示する
   document.getElementById("job-controls").style.display =
     name === "node" || name === "pipeline" ? "none" : "";
