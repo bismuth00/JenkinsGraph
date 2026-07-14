@@ -762,6 +762,7 @@ function trendOption(t, selected) {
 
 function heatmapOption(values) {
   return {
+    animation: false, // タブ切り替えや期間変更のたびのセルのアニメーションなし
     tooltip: {
       formatter: (p) =>
         `<b>${viewJobs[p.value[1]]}</b><br>${currentDates[p.value[0]]}<br>` +
