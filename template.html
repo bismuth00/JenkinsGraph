@@ -554,11 +554,6 @@ const tlEl = document.getElementById("timeline");
 tlEl.style.height = jobs.length * ROW_H_TL + 100 + "px";
 const tl = echarts.init(tlEl);
 
-// 推移グラフとヒートマップは config の report.show_trend / show_heatmap で
-// ON/OFF できる。OFF ならタブごと非表示にする
-document.getElementById("tab-trend").style.display = DATA.show_trend ? "" : "none";
-document.getElementById("tab-heatmap").style.display = DATA.show_heatmap ? "" : "none";
-
 const trendEl = document.getElementById("trend");
 let trend = null; // タブを開いたときに初期化 (非表示中は幅が取れないため)
 let trendSelected = {}; // 凡例の ON/OFF 状態 (期間切り替え後も維持する)
@@ -2079,10 +2074,10 @@ function showTab(name) {
   document.getElementById("node-controls").style.display = name === "node" ? "" : "none";
   document.getElementById("pipeline-controls").style.display = name === "pipeline" ? "" : "none";
   if (name === "trend") {
-    if (!trend && DATA.show_trend) initTrend();
+    if (!trend) initTrend();
     renderTrend();
   } else if (name === "heatmap") {
-    if (!hm && DATA.show_heatmap) {
+    if (!hm) {
       hm = echarts.init(hmEl);
       hm.on("click", (p) => {
         if (p.componentType === "yAxis") openJobPage(p.value);

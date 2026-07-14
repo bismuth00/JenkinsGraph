@@ -377,8 +377,6 @@ def main():
         "job_labels": [job_labels.get(j) for j in jobs],
         "job_urls": [job_url(cfg["jenkins"]["url"], j, urls) for j in jobs],
         "jenkins_url": cfg["jenkins"]["url"].rstrip("/"),
-        "show_trend": bool(cfg["report"].get("show_trend", True)),
-        "show_heatmap": bool(cfg["report"].get("show_heatmap", True)),
         "trend_max": int(cfg["report"].get("trend_max_jobs", 50)),
         "box_max": int(cfg["report"].get("box_max_jobs", 20)),
         "scroll_rows": int(cfg["report"].get("scroll_rows", 200)),
