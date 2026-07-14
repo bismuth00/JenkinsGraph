@@ -148,8 +148,8 @@
   <span id="pin-controls" style="display: none;">
     選択:
     <span class="presets" id="pin-count"></span>
-    <label><input type="checkbox" id="pin-only"> <span id="pin-only-label">選択のみ表示</span></label>
     <button id="pin-clear" style="display: none;">選択解除</button>
+    <label><input type="checkbox" id="pin-only"> <span id="pin-only-label">選択のみ表示</span></label>
   </span>
 </div>
 
@@ -1034,8 +1034,9 @@ for (const d of [3, 7, 14, 30, 60, 90, 180, 365].filter((d) => d <= DATA.days)) 
 // 日付を送っても維持される (セッション内のみ、リロードで消える)
 const detailPinned = new Set();
 const nodePinned = new Set();
-let detailPinOnly = false;
-let nodePinOnly = true; // ノードは「選択のみ表示」を既定 ON (未選択なら全ノード表示)
+// 「選択のみ表示」は既定 ON (未選択のうちは全行表示、☆で選ぶとその行だけに絞る)
+let detailPinOnly = true;
+let nodePinOnly = true;
 let currentDayTab = "detail"; // day-controls 系タブのうち今表示中のもの (detail/node/pipeline)
 
 const PIN_ON = "★";
