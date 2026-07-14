@@ -17,6 +17,9 @@
   .period input[type="text"] { border: 1px solid #b0bec5; border-radius: 4px; padding: 3px 8px; font-size: 13px; color: #263238; width: 240px; }
   .period select { border: 1px solid #b0bec5; border-radius: 4px; padding: 3px 8px; font-size: 13px; color: #263238; background: #fff; }
   .period label { display: flex; align-items: center; gap: 4px; margin-left: 6px; cursor: pointer; }
+  /* 「選択のみ表示」チェック・件数・解除ボタンを 1 行にまとめる (折り返さない) */
+  #pin-controls { display: inline-flex; align-items: center; gap: 6px; margin-left: 12px; white-space: nowrap; }
+  #pin-controls label { margin-left: 0; }
   .period .presets { margin-left: 12px; color: #78909c; }
   .period button { border: 1px solid #b0bec5; background: #fff; color: #455a64; padding: 4px 14px; margin-left: 6px; border-radius: 4px; cursor: pointer; font-size: 13px; }
   .period button.active { background: #607d8b; border-color: #607d8b; color: #fff; }
@@ -141,7 +144,7 @@
     <button data-zoom="4">×4</button>
     <span class="presets" id="zoom-note"></span>
   </span>
-  <span id="pin-controls" style="margin-left: 12px; display: none;">
+  <span id="pin-controls" style="display: none;">
     <label><input type="checkbox" id="pin-only"> <span id="pin-only-label">選択のみ表示</span></label>
     <span class="presets" id="pin-count"></span>
     <button id="pin-clear" style="display: none;">選択解除</button>
