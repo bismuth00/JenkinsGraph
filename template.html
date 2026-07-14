@@ -149,7 +149,7 @@
     選択:
     <span class="presets" id="pin-count"></span>
     <button id="pin-clear" style="display: none;">選択解除</button>
-    <label><input type="checkbox" id="pin-only"> <span id="pin-only-label">選択のみ表示</span></label>
+    <label><input type="checkbox" id="pin-only"> <span id="pin-only-label">選択外も表示</span></label>
   </span>
 </div>
 
@@ -1034,9 +1034,10 @@ for (const d of [3, 7, 14, 30, 60, 90, 180, 365].filter((d) => d <= DATA.days)) 
 // 日付を送っても維持される (セッション内のみ、リロードで消える)
 const detailPinned = new Set();
 const nodePinned = new Set();
-// 「選択のみ表示」は既定 ON (未選択のうちは全行表示、☆で選ぶとその行だけに絞る)
-let detailPinOnly = true;
-let nodePinOnly = true;
+// 選択があるとき、既定では選択した行だけを表示する。「選択外も表示」を
+// ON にすると選択外の行も表示する (既定 OFF)。未選択のうちは全行表示
+let detailShowUnpinned = false;
+let nodeShowUnpinned = false;
 let currentDayTab = "detail"; // day-controls 系タブのうち今表示中のもの (detail/node/pipeline)
 
 const PIN_ON = "★";
@@ -1138,9 +1139,9 @@ let detailJobs = [];
 function computeDetailView(dayStart) {
   const dayDaily = (oji) =>
     dailyFailTime(DATA.builds[oji], dayStart, 1, DATA.disabled[oji]);
-  if (detailPinOnly && detailPinned.size) {
-    // 「選択のみ表示」: 検索や失敗のみとは独立に、ピン留めしたジョブを表示する
-    // (TL_MASK の対象で、選択当時から残っているもの)
+  if (!detailShowUnpinned && detailPinned.size) {
+    // 選択があり「選択外も表示」OFF: 検索や失敗のみとは独立に、
+    // ピン留めしたジョブだけを表示する (TL_MASK の対象で残っているもの)
     const items = [];
     jobs.forEach((name, ji) => {
       if (TL_MASK[ji] && detailPinned.has(name)) items.push({ ji, name });
@@ -1438,13 +1439,13 @@ function renderDetail() {
   if (currentDayTab === "detail") updatePinControls();
 }
 
-// 「選択のみ表示」チェック・件数・解除ボタンを今のタブ (詳細/ノード) に合わせて更新する
+// 「選択外も表示」チェック・件数・解除ボタンを今のタブ (詳細/ノード) に合わせて更新する
 function updatePinControls() {
   const node = currentDayTab === "node";
   const set = node ? nodePinned : detailPinned;
-  document.getElementById("pin-only").checked = node ? nodePinOnly : detailPinOnly;
+  document.getElementById("pin-only").checked = node ? nodeShowUnpinned : detailShowUnpinned;
   document.getElementById("pin-only-label").textContent =
-    node ? "選択したノードのみ表示" : "選択したジョブのみ表示";
+    node ? "選択外のノードも表示" : "選択外のジョブも表示";
   document.getElementById("pin-count").textContent =
     set.size ? `${set.size} 件選択中` : "☆をクリックで選択";
   document.getElementById("pin-clear").style.display = set.size ? "" : "none";
@@ -1597,8 +1598,9 @@ function computeNodeView(dayStart, dayEnd) {
   });
   // 削除済みノードは、その日に表示するもの (ビルド/オフライン帯) がなければ行を出さない
   items = items.filter((it) => !it.deleted || it.runs.length || it.off.length);
-  if (nodePinOnly && nodePinned.size) {
-    // 「選択のみ表示」: 検索や空きのみとは独立に、ピン留めしたノードを表示する
+  if (!nodeShowUnpinned && nodePinned.size) {
+    // 選択があり「選択外も表示」OFF: 検索や空きのみとは独立に、
+    // ピン留めしたノードだけを表示する
     items = items.filter((it) => nodePinned.has(it.name));
   } else {
     if (terms.length) {
@@ -1787,8 +1789,8 @@ if (DATA.node_free) {
 
 // 「選択のみ表示」チェックと「選択解除」ボタン (対象タブごとに状態を持つ)
 document.getElementById("pin-only").addEventListener("change", (e) => {
-  if (currentDayTab === "node") { nodePinOnly = e.target.checked; renderNode(); }
-  else { detailPinOnly = e.target.checked; renderDetail(); }
+  if (currentDayTab === "node") { nodeShowUnpinned = e.target.checked; renderNode(); }
+  else { detailShowUnpinned = e.target.checked; renderDetail(); }
 });
 document.getElementById("pin-clear").addEventListener("click", () => {
   if (currentDayTab === "node") { nodePinned.clear(); renderNode(); }
