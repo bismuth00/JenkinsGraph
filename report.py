@@ -15,6 +15,7 @@ import json
 import re
 import sqlite3
 import tomllib
+from html import escape as html_escape
 from collections import defaultdict
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -398,8 +399,11 @@ def main():
     payload = json.dumps(data, ensure_ascii=False, separators=(",", ":"))
     packed = base64.b64encode(gzip.compress(payload.encode("utf-8"), 9)).decode("ascii")
 
+    title = str(cfg["report"].get("title", "Jenkins 健全性レポート"))
     template = Path(__file__).with_name("template.html").read_text(encoding="utf-8")
-    html = template.replace("__DATA__", json.dumps(packed))
+    html = (template
+            .replace("__TITLE__", html_escape(title))
+            .replace("__DATA__", json.dumps(packed)))
     out = Path(cfg["report"].get("output", "report.html"))
     out.write_text(html, encoding="utf-8")
     print(f"{out} を生成しました (ジョブ {len(jobs)} 件, 最大期間 {days} 日,"

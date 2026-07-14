@@ -2,7 +2,7 @@
 <html lang="ja">
 <head>
 <meta charset="utf-8">
-<title>Jenkins 健全性レポート</title>
+<title>__TITLE__</title>
 <script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
 <style>
   body { font-family: "Segoe UI", "Hiragino Sans", "Meiryo", sans-serif; margin: 24px; color: #263238; background: #fff; }
@@ -32,7 +32,7 @@
 </style>
 </head>
 <body>
-<h1>Jenkins 健全性レポート</h1>
+<h1>__TITLE__</h1>
 <p class="meta" id="meta"></p>
 
 <div class="tabs">
@@ -997,7 +997,7 @@ document.getElementById("show-disabled").addEventListener("change", render);
 document.getElementById("job-sort").addEventListener("change", render);
 
 const presetEl = document.getElementById("presets");
-for (const d of [7, 14, 30, 60, 90, 180, 365].filter((d) => d <= DATA.days)) {
+for (const d of [3, 7, 14, 30, 60, 90, 180, 365].filter((d) => d <= DATA.days)) {
   const btn = document.createElement("button");
   btn.textContent = `${d}日`;
   btn.dataset.days = d;
