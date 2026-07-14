@@ -20,6 +20,7 @@
   /* 「選択のみ表示」チェック・件数・解除ボタンを 1 行にまとめる (折り返さない) */
   #pin-controls { display: inline-flex; align-items: center; gap: 6px; margin-left: 12px; white-space: nowrap; }
   #pin-controls label { margin-left: 0; }
+  #pin-controls .presets { margin-left: 0; }
   .period .presets { margin-left: 12px; color: #78909c; }
   .period button { border: 1px solid #b0bec5; background: #fff; color: #455a64; padding: 4px 14px; margin-left: 6px; border-radius: 4px; cursor: pointer; font-size: 13px; }
   .period button.active { background: #607d8b; border-color: #607d8b; color: #fff; }
@@ -145,8 +146,9 @@
     <span class="presets" id="zoom-note"></span>
   </span>
   <span id="pin-controls" style="display: none;">
-    <label><input type="checkbox" id="pin-only"> <span id="pin-only-label">選択のみ表示</span></label>
+    選択:
     <span class="presets" id="pin-count"></span>
+    <label><input type="checkbox" id="pin-only"> <span id="pin-only-label">選択のみ表示</span></label>
     <button id="pin-clear" style="display: none;">選択解除</button>
   </span>
 </div>
