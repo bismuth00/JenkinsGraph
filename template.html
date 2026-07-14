@@ -1020,27 +1020,58 @@ for (const d of [3, 7, 14, 30, 60, 90, 180, 365].filter((d) => d <= DATA.days)) 
 // ---- 詳細タイムライン (1 日単位、ビルド実行と待機状態) ----
 
 // 時間軸 (X 軸) の表示倍率。×2 なら 12 時間、×4 なら 6 時間の窓で表示し、
-// 拡大中はチャート上の横ドラッグで時間帯を移動する (詳細/ノード共通)
+// 拡大中はチャート上の横ドラッグで時間帯を移動する (詳細/ノード共通)。
+// X 軸ズームは inside dataZoom ではなく xAxis の min/max で行う。
+// (行スクロール用の Y 軸 inside dataZoom と同じグリッドに X 軸 inside
+//  dataZoom を置くと、マウスホイールが競合して縦スクロールが効かなくなるため)
 let dayZoom = 1;
+let winOffset = 0; // ズーム窓の開始位置 (その日の 0 時からのオフセット ms)
 
-function dayXZoom(dayStart) {
-  if (dayZoom <= 1) return [];
-  return [{
-    type: "inside",
-    xAxisIndex: 0,
-    startValue: dayStart,
-    endValue: dayStart + DAY_MS / dayZoom,
-    zoomOnMouseWheel: false,
-    moveOnMouseWheel: false,
-    moveOnMouseMove: true, // ドラッグで時間帯を移動
-    filterMode: "none", // custom series は dataIndex がずれると壊れるため間引かない
-  }];
+function clampWinOffset() {
+  const windowMs = DAY_MS / dayZoom;
+  winOffset = Math.max(0, Math.min(winOffset, DAY_MS - windowMs));
+}
+
+// その日 [dayStart, axisEnd) に対する X 軸の表示範囲 (min/max)。
+// 倍率 1 のときは 1 日全体、拡大時はズーム窓
+function dayWindow(dayStart, axisEnd) {
+  if (dayZoom <= 1) return { min: dayStart, max: axisEnd };
+  clampWinOffset();
+  const min = dayStart + winOffset;
+  return { min, max: min + DAY_MS / dayZoom };
+}
+
+// 拡大中の横ドラッグで時間帯を移動する (ズーム窓 = xAxis min/max を更新)。
+// zrender は移動が大きいと click を発生させないので、ビルド帯クリックとは競合しない
+function attachTimePan(chart, getDayStart) {
+  let pan = null;
+  const zr = chart.getZr();
+  zr.on("mousedown", (e) => {
+    if (dayZoom > 1) pan = { x: e.offsetX, off: winOffset };
+  });
+  zr.on("mousemove", (e) => {
+    if (!pan) return;
+    const windowMs = DAY_MS / dayZoom;
+    const dayStart = getDayStart();
+    const px0 = chart.convertToPixel({ xAxisIndex: 0 }, dayStart + winOffset);
+    const px1 = chart.convertToPixel({ xAxisIndex: 0 }, dayStart + winOffset + windowMs);
+    const gw = px1 - px0; // グリッドのピクセル幅
+    if (gw <= 0) return;
+    winOffset = Math.max(0, Math.min(pan.off - (e.offsetX - pan.x) / gw * windowMs,
+      DAY_MS - windowMs));
+    const min = dayStart + winOffset;
+    chart.setOption({ xAxis: { min, max: min + windowMs } });
+  });
+  const end = () => { pan = null; };
+  zr.on("mouseup", end);
+  zr.on("globalout", end);
 }
 
 const zoomEl = document.getElementById("zoom-controls");
 for (const b of zoomEl.querySelectorAll("button")) {
   b.addEventListener("click", () => {
     dayZoom = Number(b.dataset.zoom);
+    clampWinOffset();
     for (const x of zoomEl.querySelectorAll("button")) {
       x.classList.toggle("active", x === b);
     }
@@ -1210,12 +1241,11 @@ function detailOption(dayStart, axisEnd) {
           `<span style="color:#90a4ae">クリックでビルドページを開く</span>`;
       },
     },
-    dataZoom: [...rowScroll(detailJobs.length, "detail-scroll-note"), ...dayXZoom(dayStart)],
+    dataZoom: rowScroll(detailJobs.length, "detail-scroll-note"),
     grid: { left: gridLeft, right: 30, top: 20, bottom: 40 },
     xAxis: {
       type: "time",
-      min: dayStart,
-      max: axisEnd,
+      ...dayWindow(dayStart, axisEnd),
       axisLabel: {
         formatter: (t) => new Date(t).toLocaleTimeString("ja-JP", { hour: "2-digit", minute: "2-digit" }),
       },
@@ -1361,6 +1391,7 @@ function renderDetail() {
 }
 
 function renderDayViews() {
+  winOffset = 0; // 日付が変わったらズーム窓の位置を先頭に戻す (倍率は維持)
   renderDetail();
   renderNode();
   renderPipeline();
@@ -1563,12 +1594,11 @@ function nodeOption(dayStart, axisEnd) {
           `<span style="color:#90a4ae">クリックでビルドページを開く</span>`;
       },
     },
-    dataZoom: [...rowScroll(currentNodeRows.length, "node-scroll-note"), ...dayXZoom(dayStart)],
+    dataZoom: rowScroll(currentNodeRows.length, "node-scroll-note"),
     grid: { left: 250, right: 30, top: 20, bottom: 40 },
     xAxis: {
       type: "time",
-      min: dayStart,
-      max: axisEnd,
+      ...dayWindow(dayStart, axisEnd),
       axisLabel: {
         formatter: (t) => new Date(t).toLocaleTimeString("ja-JP", { hour: "2-digit", minute: "2-digit" }),
       },
@@ -1994,6 +2024,7 @@ function showTab(name) {
         const d = currentDetail[p.dataIndex];
         if (d && p.componentType === "series") openBuildPage(detailIdx[d[0]], d[5]);
       });
+      attachTimePan(detailChart, () => parseDate(detailDate.value));
     }
     renderDetail();
   } else if (name === "node") {
@@ -2006,6 +2037,7 @@ function showTab(name) {
         if (d.kind === "run") openBuildPage(d.oji, d.number);
         else if (d.kind === "off") openNodePage(currentNodeRows[d.row]);
       });
+      attachTimePan(nodeChart, () => parseDate(detailDate.value));
     }
     renderNode();
   } else if (name === "pipeline") {
